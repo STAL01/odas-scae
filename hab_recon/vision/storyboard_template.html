@@ -1,0 +1,522 @@
+<title>HAB-RECON Recon Demo</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+/* Ground-station console: one reading column for the story, wide panels for the map and the camera feed. Single dark look by choice. */
+:root{
+  color-scheme: dark;
+  --bg:#0e1216; --panel:#151b22; --panel-2:#1b232c; --line:#27313c; --line-2:#34414e;
+  --fg:#e8edf2; --fg-2:#b9c3cd; --muted:#8d99a6;
+  --accent:#c98500;
+  --veh:#d95926; --infra:#199e70; --airsea:#3987e5; --other:#8d99a6; --target:#e66767;
+  --ph-climb:#199e70; --ph-jet:#c98500; --ph-loiter:#d55181; --ph-desc:#9085e9; --ph-free:#6f7b87;
+  --sea:#0c2030; --land:#151b21; --land-bg:#212b35; --border:#5d6f82; --river:#3479aa;
+  --f-display:"Barlow Condensed","Arial Narrow",system-ui,sans-serif;
+  --f-body:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --f-mono:"JetBrains Mono",ui-monospace,Consolas,monospace;
+}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--fg);font:15px/1.55 var(--f-body);margin:0}
+a{color:#8fc1ff}
+.wrap{max-width:1180px;margin:0 auto;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));padding-block:32px 64px;display:grid;gap:44px}
+h1,h2,h3{font-family:var(--f-display);font-weight:700;letter-spacing:.01em;text-wrap:balance;margin:0;line-height:1.1}
+h1{font-size:clamp(34px,5vw,52px)} h2{font-size:28px} h3{font-size:19px;font-weight:600}
+p{margin:0}
+.eyebrow{font:600 13px var(--f-display);letter-spacing:.14em;text-transform:uppercase;color:var(--accent)}
+.lead{font-size:17px;color:var(--fg-2);max-width:68ch}
+.note{font-size:13px;color:var(--muted);max-width:80ch}
+.note code{font:12px var(--f-mono);color:var(--fg-2);background:var(--panel-2);padding:1px 5px;border-radius:4px}
+.hero{display:grid;gap:14px}
+.chips{display:flex;flex-wrap:wrap;gap:8px}
+.chip{font:500 12px var(--f-mono);padding:4px 10px;border:1px solid var(--line-2);border-radius:999px;color:var(--fg-2)}
+.chip.warn{border-color:#6a5a1e;color:#f0c552;background:rgba(201,133,0,.08)}
+.chip.ok{border-color:#1f5a45;color:#5fd3a6;background:rgba(25,158,112,.08)}
+section{display:grid;gap:16px}
+.sec-h{display:grid;gap:6px}
+.sec-h p{color:var(--muted);max-width:74ch}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px;min-width:0}
+.mono{font-family:var(--f-mono);font-variant-numeric:tabular-nums}
+
+/* flight */
+.flight{display:grid;grid-template-columns:minmax(0,1.6fr) minmax(0,1fr);gap:16px}
+.mapscroll{position:relative}
+#mapSvg{width:100%;height:auto;display:block;border-radius:8px}
+#mapSvg .stopmk{cursor:pointer}
+#mapSvg .stopmk:focus-visible rect{stroke:var(--accent);stroke-width:3}
+.legend{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:12px;color:var(--fg-2);margin-top:10px}
+.legend span{display:inline-flex;align-items:center;gap:7px}
+.sw{width:18px;height:0;border-top:3px solid currentColor;border-radius:2px}
+.sw.dash{border-top-style:dashed;border-top-width:2px}
+.sq{width:12px;height:12px;border-radius:3px;background:var(--fg);color:var(--bg);font:700 9px/12px var(--f-mono);text-align:center}
+.ring{width:12px;height:12px;border-radius:50%;border:2px solid var(--target)}
+.apt{width:10px;height:10px;border:1.5px solid var(--fg-2);transform:rotate(45deg)}
+.timeline{list-style:none;margin:0;padding:0;display:grid;gap:0}
+.timeline li{display:grid;grid-template-columns:62px 1fr;gap:12px;padding:9px 0;border-top:1px solid var(--line)}
+.timeline li:first-child{border-top:0}
+.timeline time{font:500 13px var(--f-mono);color:var(--muted);padding-top:1px}
+.timeline b{font-weight:600}
+.timeline .sub{display:block;font-size:13px;color:var(--muted)}
+.timeline li.stop{background:linear-gradient(90deg,rgba(255,255,255,.035),transparent)}
+.timeline li.stop time{color:var(--fg)}
+.stopno{display:inline-grid;place-items:center;width:18px;height:18px;border-radius:4px;background:var(--fg);color:var(--bg);font:700 11px var(--f-mono);margin-right:6px;vertical-align:1px}
+.altbox{position:relative}
+#altSvg{width:100%;height:auto;display:block}
+.altscroll{position:relative}
+@media (max-width:600px){.altscroll,.mapscroll{overflow-x:auto;padding-top:26px}#altSvg{width:620px;max-width:none}#mapSvg{width:640px;max-width:none}}
+.tip{position:absolute;pointer-events:none;background:var(--panel-2);border:1px solid var(--line-2);border-radius:6px;padding:5px 8px;font:12px var(--f-mono);color:var(--fg);white-space:nowrap;transform:translate(-50%,-115%);z-index:3}
+
+/* camera */
+.tabs{display:flex;flex-wrap:wrap;gap:8px}
+.tab{appearance:none;border:1px solid var(--line-2);background:var(--panel);color:var(--fg-2);border-radius:8px;padding:8px 12px;font:500 13px var(--f-body);cursor:pointer;display:inline-flex;align-items:center;gap:8px}
+.tab:hover{border-color:#4a5868;color:var(--fg)}
+.tab[aria-selected="true"]{border-color:var(--fg);color:var(--fg);background:var(--panel-2)}
+.tab:focus-visible,.cat input:focus-visible+span{outline:2px solid var(--accent);outline-offset:2px}
+.tab .t{font:12px var(--f-mono);color:var(--muted)}
+.viewer{display:grid;grid-template-columns:minmax(0,1fr) 310px;gap:16px}
+.feed{position:relative;aspect-ratio:4/3;max-width:100%;background:#05080b;border-radius:10px;overflow:hidden;border:1px solid var(--line)}
+#feedCanvas{position:absolute;inset:0;width:100%;height:100%;cursor:crosshair}
+.wait{position:absolute;inset:0;display:grid;place-content:center;gap:10px;padding:56px 28px;text-align:center;color:var(--fg-2);font-size:14px;
+  background:repeating-linear-gradient(0deg,transparent 0 39px,rgba(255,255,255,.035) 39px 40px),repeating-linear-gradient(90deg,transparent 0 39px,rgba(255,255,255,.035) 39px 40px)}
+.wait b{font:700 20px var(--f-display);letter-spacing:.06em;text-transform:uppercase;color:var(--fg)}
+.wait code{font:12px var(--f-mono);color:var(--fg);background:rgba(255,255,255,.07);padding:2px 6px;border-radius:4px}
+.wait p{max-width:52ch;margin:0 auto}
+.hud{position:absolute;left:0;right:0;display:flex;justify-content:space-between;gap:8px;padding:8px 10px;font:500 12px var(--f-mono);color:#f2f5f8;text-shadow:0 0 3px #000,0 0 2px #000;pointer-events:none;flex-wrap:wrap;z-index:2}
+.hud.top{top:0;background:linear-gradient(180deg,rgba(0,0,0,.55),transparent)}
+.hud.bot{bottom:0;background:linear-gradient(0deg,rgba(0,0,0,.6),transparent)}
+.hud .nm{font:700 15px var(--f-display);letter-spacing:.08em;text-transform:uppercase}
+.cross{position:absolute;left:50%;top:50%;width:46px;height:46px;transform:translate(-50%,-50%);pointer-events:none;z-index:1}
+.cross:before,.cross:after{content:"";position:absolute;background:rgba(242,245,248,.75)}
+.cross:before{left:50%;top:0;bottom:0;width:1px;box-shadow:0 0 2px #000}
+.cross:after{top:50%;left:0;right:0;height:1px;box-shadow:0 0 2px #000}
+.cats{display:flex;flex-wrap:wrap;gap:8px}
+.cat{display:inline-flex;align-items:center;gap:7px;font-size:13px;color:var(--fg-2);cursor:pointer;user-select:none}
+.cat input{position:absolute;opacity:0;width:1px;height:1px}
+.cat span{display:inline-flex;align-items:center;gap:7px;padding:5px 10px;border:1px solid var(--line-2);border-radius:999px}
+.cat input:checked+span{border-color:var(--fg-2);color:var(--fg)}
+.cat input:not(:checked)+span{opacity:.5}
+.dot{width:10px;height:10px;border-radius:2px;border:2px solid currentColor}
+.side{display:grid;gap:14px;align-content:start;min-width:0}
+.find{list-style:none;margin:0;padding:0;display:grid;gap:8px}
+.find li{display:grid;grid-template-columns:12px 1fr auto;gap:8px;align-items:center;font-size:14px}
+.find .n{font:600 15px var(--f-mono)}
+.find .bar{grid-column:2 / 4;height:4px;background:var(--panel-2);border-radius:2px;overflow:hidden}
+.find .bar i{display:block;height:100%;background:currentColor;border-radius:2px}
+.find .empty{color:var(--muted);font-size:13px;display:block}
+.report{font-size:14px;color:var(--fg-2);border-left:2px solid var(--line-2);padding-left:10px}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:5px 12px;font-size:13px;margin:0}
+.kv dt{color:var(--muted)} .kv dd{margin:0;font-family:var(--f-mono);font-variant-numeric:tabular-nums;min-width:0;overflow-wrap:anywhere}
+
+/* report table */
+.tablewrap{overflow-x:auto}
+table{width:100%;border-collapse:collapse;font-size:14px}
+th{text-align:left;font:600 12px var(--f-display);letter-spacing:.1em;text-transform:uppercase;color:var(--muted);padding:8px 10px;border-bottom:1px solid var(--line-2);white-space:nowrap}
+td{padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+td.num{font-family:var(--f-mono);text-align:right;white-space:nowrap}
+th.num{text-align:right}
+td.dim{color:var(--muted)}
+
+/* build list */
+.cols{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(0,1fr);gap:16px}
+.build{margin:0;padding-left:20px;display:grid;gap:10px}
+.build li::marker{color:var(--muted);font-family:var(--f-mono)}
+.ask{margin:0;padding-left:20px;display:grid;gap:10px}
+.ask li::marker{color:var(--accent)}
+
+@media (max-width:900px){.flight,.viewer,.cols{grid-template-columns:1fr}}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;scroll-behavior:auto!important}}
+</style>
+
+<div class="wrap">
+  <header class="hero">
+    <div class="eyebrow">EDTH Sofia · balloon reconnaissance · demo proposal</div>
+    <h1>HAB-RECON recon demo</h1>
+    <p class="lead" id="lead"></p>
+    <div class="chips" id="chips"></div>
+    <p class="note" id="heroNote"></p>
+  </header>
+
+  <section aria-labelledby="h-flight">
+    <div class="sec-h">
+      <div class="eyebrow">1 · The flight</div>
+      <h2 id="h-flight">Sofia to Ruse on the jet stream</h2>
+      <p id="flightText"></p>
+    </div>
+    <div class="flight">
+      <div class="panel">
+        <div class="mapscroll">
+          <svg id="mapSvg" viewBox="0 0 720 490" role="img" aria-label="Map of Bulgaria with the planned flight and the recon stops at their real positions"></svg>
+        </div>
+        <div class="legend">
+          <span style="color:var(--ph-climb)"><i class="sw"></i>Climb</span>
+          <span style="color:var(--ph-jet)"><i class="sw"></i>Jet-stream ride, 11 km</span>
+          <span style="color:var(--ph-loiter)"><i class="sw"></i>Loiter, 20 km</span>
+          <span style="color:var(--ph-desc)"><i class="sw"></i>Parachute descent</span>
+          <span style="color:var(--ph-free)"><i class="sw dash"></i>Same balloon, no altitude control</span>
+          <span><i class="sq">1</i>Recon stop</span>
+          <span><i class="ring"></i>Target</span>
+          <span><i class="apt"></i>Other airports</span>
+        </div>
+      </div>
+      <div class="panel">
+        <h3 style="margin-bottom:8px">Timeline</h3>
+        <ol class="timeline" id="timeline"></ol>
+      </div>
+    </div>
+    <div class="panel altbox">
+      <h3 style="margin-bottom:6px">Altitude</h3>
+      <div class="altscroll">
+        <svg id="altSvg" viewBox="0 0 1000 220" role="img" aria-label="Altitude over time with the camera captures marked"></svg>
+        <div class="tip" id="altTip" hidden></div>
+      </div>
+    </div>
+  </section>
+
+  <section aria-labelledby="h-cam" id="camera">
+    <div class="sec-h">
+      <div class="eyebrow">2 · The camera</div>
+      <h2 id="h-cam">What the camera sees at each stop</h2>
+      <p id="camText"></p>
+    </div>
+    <div class="tabs" role="tablist" id="tabs"></div>
+    <div class="cats" id="cats"></div>
+    <div class="viewer">
+      <div class="feed" id="feed">
+        <canvas id="feedCanvas" aria-label="Camera picture with detections"></canvas>
+        <div class="wait" id="wait" hidden></div>
+        <div class="cross" id="cross"></div>
+        <div class="hud top"><span class="nm" id="hudName"></span><span id="hudTime"></span></div>
+        <div class="hud bot"><span id="hudGeo"></span><span id="hudCount"></span></div>
+        <div class="tip" id="feedTip" hidden></div>
+      </div>
+      <div class="side">
+        <div class="panel">
+          <h3 style="margin-bottom:10px">Findings</h3>
+          <ul class="find" id="find"></ul>
+        </div>
+        <div class="panel" style="display:grid;gap:10px">
+          <h3>Report line</h3>
+          <p class="report" id="reportLine"></p>
+          <dl class="kv" id="geoKv"></dl>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section aria-labelledby="h-rep">
+    <div class="sec-h">
+      <div class="eyebrow">3 · The intel report</div>
+      <h2 id="h-rep">One line per stop, ready to export</h2>
+      <p>A new tab in the dashboard collects every capture with the position of each finding. It exports as a spreadsheet file and as a KML file that opens in Google Earth with every finding pinned.</p>
+    </div>
+    <div class="panel tablewrap">
+      <table>
+        <thead><tr><th>Time</th><th>Stop</th><th>Finding</th><th class="num">Count</th><th class="num">Best conf.</th></tr></thead>
+        <tbody id="repBody"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section aria-labelledby="h-build">
+    <div class="sec-h">
+      <div class="eyebrow">4 · To build</div>
+      <h2 id="h-build">What changes in the code</h2>
+    </div>
+    <div class="cols">
+      <div class="panel">
+        <ul class="build">
+          <li><b>Real places on the map.</b> The mission starts as Sofia → Ruse with these stops. An "Add stop" button lets you click any other place and give it a name and a kind (airport, road, rail, bridge, port).</li>
+          <li><b>Gimbal camera.</b> When the balloon passes within 15 km of a stop, the camera points at it and takes the picture from the real satellite imagery of that spot, at the resolution the slant range allows.</li>
+          <li><b>Operator camera view.</b> Rotated boxes with labels, the overlay shown above, a scale bar, and filters for vehicles, infrastructure, and aircraft and ships.</li>
+          <li><b>All detector classes.</b> Planes, helicopters, bridges, roundabouts, storage tanks and harbours are shown, not only vehicles.</li>
+          <li><b>Intel report tab.</b> One line per capture with the position of every finding, exported as a spreadsheet file and as KML for Google Earth.</li>
+          <li><b>Route check.</b> The planner says when a stop is out of reach of the wind, so you move the launch site or the target before the demo.</li>
+        </ul>
+      </div>
+      <div class="panel">
+        <h3 style="margin-bottom:10px">Your decisions</h3>
+        <ol class="ask">
+          <li>Are these the right places? Each stop has a Google Maps link in the camera panel so you can check it.</li>
+          <li>Keep sports fields and pools hidden?</li>
+          <li>Does the report need KML, or is the spreadsheet file enough?</li>
+        </ol>
+      </div>
+    </div>
+  </section>
+</div>
+
+<script>
+const ROUTE = __ROUTE__;
+const SCENES = __SCENES__;
+const META = __META__;
+const HAS = Object.keys(SCENES).length > 0;
+const STOPS = ROUTE.stops;
+const CLS = {0:['Plane','airsea'],1:['Ship','airsea'],2:['Storage tank','infra'],3:['Baseball field','other'],4:['Tennis court','other'],5:['Basketball court','other'],6:['Running track','other'],7:['Harbour','infra'],8:['Bridge','infra'],9:['Truck / bus','veh'],10:['Car','veh'],11:['Helicopter','airsea'],12:['Roundabout','infra'],13:['Football pitch','other'],14:['Swimming pool','other']};
+const PLURAL = {0:'planes',1:'ships',2:'storage tanks',7:'harbours',8:'bridges',9:'trucks/buses',10:'cars',11:'helicopters',12:'roundabouts'};
+const CAT = {veh:['Vehicles','--veh'],infra:['Infrastructure','--infra'],airsea:['Aircraft and ships','--airsea'],other:['Sports fields and pools','--other']};
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const $ = id => document.getElementById(id);
+const fmtT = s => `T+${Math.floor(s / 3600)}:${String(Math.floor(s / 60) % 60).padStart(2, '0')}`;
+const km = m => (m / 1000).toFixed(1);
+const PH = {1:'--ph-climb',5:'--ph-climb',4:'--ph-jet',6:'--ph-loiter',2:'--ph-desc',3:'--ph-desc'};
+const SVGNS = 'http://www.w3.org/2000/svg';
+function el(tag, attrs, parent) { const e = document.createElementNS(SVGNS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); parent && parent.appendChild(e); return e; }
+function txt(parent, x, y, s, attrs) { const t = el('text', Object.assign({ x, y }, attrs || {}), parent); t.textContent = s; return t; }
+const ev = t => ROUTE.events.find(e => e.type === t) || { t: 0, z: 0 };
+const tgtStop = STOPS[STOPS.length - 1];
+const gmaps = (lat, lon, m) => `https://www.google.com/maps/@${lat.toFixed(5)},${lon.toFixed(5)},${Math.round(m)}m/data=!3m1!1e3`;
+const countOf = (s, cls) => (SCENES[s.id] ? SCENES[s.id].dets.filter(d => d[5] === cls).length : 0);
+
+// ---------------- words that depend on whether the pictures exist ----------------
+(function words() {
+  const names = STOPS.slice(0, -1).map(s => s.phrase || s.name);
+  $('lead').textContent = `One simulated flight from Sofia rides the jet stream north-east to Ruse on the Danube. On the way the balloon camera photographs ${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}, then the balloon climbs to 20 km over ${tgtStop.phrase || tgtStop.name}. Every stop is a real place at its real position.`;
+  const chips = [HAS ? `<span class="chip ok">Real satellite pictures · ${META.made}</span>` : `<span class="chip warn">Mockup · pictures not made yet</span>`,
+    `<span class="chip">${STOPS.length} recon stops</span>`, `<span class="chip">over the target at ${fmtT(tgtStop.t)}</span>`, `<span class="chip">same detector as the app</span>`];
+  $('chips').innerHTML = chips.join('');
+  $('heroNote').innerHTML = HAS
+    ? `Pictures: Esri World Imagery of each stop (Esri, Maxar, Earthstar Geographics), turned into what the balloon camera would see and run through the detector the dashboard uses (${META.model}). The boxes are its real output; nothing is drawn by hand.`
+    : `The pictures are made on your laptop, because this page was built where the satellite imagery server can't be reached. Double-click <code>vision\\make_storyboard.bat</code>: it photographs every stop below from the real satellite imagery, runs the detector, and opens this same page with the pictures in it.`;
+  $('flightText').textContent = `The track comes from the dashboard's own physics. The balloon climbs out of Sofia, catches the jet stream at about 11 km and rides it north-east along the Stara Planina, past ${['no', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight'][STOPS.length - 1] || STOPS.length - 1} places the camera gimbal points at, then drops ballast and climbs to 20 km over the target. The wind is the dashboard's example wind field, not a forecast for a real day.`;
+  $('camText').textContent = HAS
+    ? 'Each picture is what a 250 mm camera on the balloon sees from that distance, drawn top-down with north up. The operator centres the frame on the busiest spot near the planned point; the panel says how far that moved it. Point at a box to see what it is and where. Sports fields and pools are hidden by default as clutter.'
+    : 'Each picture will be what a 250 mm camera on the balloon sees from that distance, drawn top-down with north up, with the detector\'s boxes on it. Until the pictures are made, each stop shows where the camera will look and what it is looking for.';
+})();
+
+// ---------------- map of Bulgaria ----------------
+(function drawMap() {
+  const svg = $('mapSvg'), W = 720, H = 490;
+  const LON0 = 22.25, LON1 = 28.75, LAT0 = 41.15, LAT1 = 44.35, C = Math.cos(42.75 * Math.PI / 180);
+  const k = Math.min(W / ((LON1 - LON0) * C), H / (LAT1 - LAT0));
+  const ox = (W - (LON1 - LON0) * C * k) / 2, oy = (H - (LAT1 - LAT0) * k) / 2;
+  const X = lon => ox + (lon - LON0) * C * k, Y = lat => oy + (LAT1 - lat) * k;
+  const P = pts => pts.map(p => `${X(p[1]).toFixed(1)},${Y(p[0]).toFixed(1)}`).join(' ');
+  const muted = css('--muted'), mono = css('--f-mono');
+  el('rect', { x: 0, y: 0, width: W, height: H, fill: css('--sea') }, svg);
+  const G = ROUTE.geo;
+  for (const [nm, rings] of Object.entries(G.countries)) {
+    const bg = nm === 'Bulgaria';
+    rings.forEach(r => el('polygon', { points: P(r), fill: bg ? css('--land-bg') : css('--land'), stroke: bg ? css('--border') : css('--line-2'), 'stroke-width': bg ? 1.4 : 0.8, 'stroke-linejoin': 'round' }, svg));
+  }
+  (G.danube_poly || []).forEach(r => el('polygon', { points: P(r), fill: css('--river'), stroke: css('--river'), 'stroke-width': 1.2, 'stroke-linejoin': 'round' }, svg));
+  const faint = { fill: '#55636f', 'font-size': 11, 'font-family': css('--f-display'), 'letter-spacing': '.18em' };
+  txt(svg, X(25.2), Y(44.2), 'ROMANIA', faint); txt(svg, X(22.32), Y(43.2), 'SERBIA', faint);
+  txt(svg, X(22.3), Y(41.42), 'N. MACEDONIA', faint); txt(svg, X(24.2), Y(41.25), 'GREECE', faint);
+  txt(svg, X(27.0), Y(41.3), 'TÜRKIYE', faint); txt(svg, X(27.95), Y(42.95), 'BLACK SEA', Object.assign({}, faint, { fill: '#3b5a72' }));
+  txt(svg, X(26.75), Y(44.13), 'Danube', { fill: '#4f87b2', 'font-size': 11, 'font-style': 'italic' });
+  txt(svg, X(24.6), Y(42.62), 'STARA PLANINA', Object.assign({}, faint, { fill: '#4d5a66', 'font-size': 10 }));
+  // other airports and cities
+  const stopSet = new Set(STOPS.map(s => s.place.split(',')[0]));
+  G.airports.forEach(([code, la, lo]) => {
+    if (STOPS.some(s => Math.abs(s.lat - la) < 0.03 && Math.abs(s.lon - lo) < 0.03)) return;
+    el('rect', { x: X(lo) - 3.5, y: Y(la) - 3.5, width: 7, height: 7, fill: 'none', stroke: css('--fg-2'), 'stroke-width': 1.3, transform: `rotate(45 ${X(lo)} ${Y(la)})` }, svg);
+    txt(svg, X(lo) + 7, Y(la) + 12, code, { fill: muted, 'font-size': 9.5, 'font-family': mono });
+  });
+  G.cities.forEach(([nm, la, lo, big, side]) => {
+    el('circle', { cx: X(lo), cy: Y(la), r: big > 1 ? 3 : 2.1, fill: css('--fg-2'), opacity: .85 }, svg);
+    if (stopSet.has(nm) || nm === 'Sofia') return;
+    const left = side === 'L';
+    txt(svg, X(lo) + (left ? -5 : 5), Y(la) - 4, nm, { 'text-anchor': left ? 'end' : 'start', fill: big > 1 ? css('--fg-2') : muted, 'font-size': big > 1 ? 12 : 10.5 });
+  });
+  // flight
+  el('polyline', { points: P(ROUTE.free), fill: 'none', stroke: css('--ph-free'), 'stroke-width': 1.6, 'stroke-dasharray': '4 4' }, svg);
+  let seg = [], col = null;
+  const flush = () => { if (seg.length > 1) el('polyline', { points: seg.join(' '), fill: 'none', stroke: col, 'stroke-width': 3, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }, svg); };
+  ROUTE.pts.forEach(p => { const c = css(PH[p[4]] || '--ph-climb'); if (c !== col) { flush(); seg = seg.length ? [seg[seg.length - 1]] : []; col = c; } seg.push(`${X(p[1]).toFixed(1)},${Y(p[0]).toFixed(1)}`); });
+  flush();
+  const tgt = css('--target');
+  el('circle', { cx: X(ROUTE.target.lon), cy: Y(ROUTE.target.lat), r: 13, fill: 'none', stroke: tgt, 'stroke-width': 1.6, 'stroke-dasharray': '4 3' }, svg);
+  // launch, landing
+  el('circle', { cx: X(ROUTE.launch.lon), cy: Y(ROUTE.launch.lat), r: 5.5, fill: css('--ph-climb'), stroke: css('--fg'), 'stroke-width': 2 }, svg);
+  txt(svg, X(ROUTE.launch.lon) - 10, Y(ROUTE.launch.lat) + 5, 'Sofia · launch', { 'text-anchor': 'end', fill: css('--fg'), 'font-size': 12, 'font-weight': 600 });
+  const end = ROUTE.pts[ROUTE.pts.length - 1];
+  txt(svg, X(end[1]), Y(end[0]) + 5, '✕', { fill: css('--ph-desc'), 'font-size': 15, 'font-weight': 700, 'text-anchor': 'middle' });
+  txt(svg, X(end[1]) + 9, Y(end[0]) + 17, 'landing', { fill: css('--ph-desc'), 'font-size': 10.5 });
+  // stops: line of sight from the balloon, numbered marker, short label
+  STOPS.forEach(s => {
+    const mx = X(s.lon), my = Y(s.lat), off = s.mk || [0, 0];
+    if (s.off_m > 1500) el('line', { x1: X(s.bal[1]), y1: Y(s.bal[0]), x2: mx, y2: my, stroke: css('--fg'), 'stroke-width': 1, 'stroke-dasharray': '2 2', opacity: .8 }, svg);
+    if (off[0] || off[1]) {                        // too close to something else: marker beside the spot, with a leader
+      el('line', { x1: mx, y1: my, x2: mx + off[0], y2: my + off[1], stroke: css('--fg'), 'stroke-width': 1 }, svg);
+      el('circle', { cx: mx, cy: my, r: 2.4, fill: css('--fg') }, svg);
+    }
+    const g = el('g', { class: 'stopmk', transform: `translate(${(mx + off[0]).toFixed(1)},${(my + off[1]).toFixed(1)})`, tabindex: 0, role: 'button', 'aria-label': `Stop ${s.id}: ${s.name}` }, svg);
+    el('title', {}, g).textContent = `${s.id} · ${s.name} · ${fmtT(s.t)}`;
+    el('rect', { x: -8.5, y: -8.5, width: 17, height: 17, rx: 4, fill: css('--fg'), stroke: css('--bg'), 'stroke-width': 2 }, g);
+    txt(g, 0, 4.2, s.id, { 'text-anchor': 'middle', fill: css('--bg'), 'font-size': 11.5, 'font-weight': 700, 'font-family': mono });
+    const L = s.label || [12, -10, 'start'];
+    txt(g, L[0], L[1], s.short || s.name, { 'text-anchor': L[2], fill: css('--fg'), 'font-size': 12, 'font-weight': 500, stroke: css('--sea'), 'stroke-width': 3, 'paint-order': 'stroke' });
+    const go = () => { pick(s); $('camera').scrollIntoView({ behavior: 'smooth', block: 'start' }); };
+    g.addEventListener('click', go); g.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(); } });
+  });
+  // north arrow, scale bar
+  const nb = el('g', { transform: `translate(${W - 22},26)` }, svg);
+  el('path', { d: 'M0 -12 L6 6 L0 2 L-6 6 Z', fill: css('--fg-2') }, nb);
+  txt(nb, 0, 20, 'N', { 'text-anchor': 'middle', fill: muted, 'font-size': 11 });
+  const sb = 50 / 111.2 * k;
+  el('line', { x1: 16, y1: H - 14, x2: 16 + sb, y2: H - 14, stroke: css('--fg-2'), 'stroke-width': 2 }, svg);
+  txt(svg, 16, H - 20, '50 km', { fill: muted, 'font-size': 11, 'font-family': mono });
+})();
+
+// ---------------- timeline ----------------
+(function timeline() {
+  const rows = [[0, 'Launch from Sofia', 'climbing at about 5 m/s'],
+    [ev('jet').t, 'Jet stream reached', `valve vents helium, rides at 11 km, about ${Math.round(ROUTE.jet_speed || 29)} m/s`],
+    [ev('climb').t, 'Ballast dropped', 'climbs to 20 km over the target'],
+    [ev('cut').t, 'Cut-down', 'payload descends under the parachute'],
+    [ev('land').t, 'Landing', 'predicted landing area shown on the map']];
+  STOPS.forEach(s => rows.push([s.t, `<span class="stopno">${s.id}</span>${s.name}`,
+    s.offnadir < 12 ? `almost straight down from ${km(s.bal[2])} km · ${s.gsd.toFixed(2)} m per pixel` : `${km(s.off_m)} km beside the track · slant ${km(s.slant)} km · ${s.gsd.toFixed(2)} m per pixel`, true]));
+  rows.sort((a, b) => a[0] - b[0] || (a[3] ? 1 : -1));
+  $('timeline').innerHTML = rows.map(([t, a, b, s]) => `<li class="${s ? 'stop' : ''}"><time>${fmtT(t)}</time><div><b>${a}</b><span class="sub">${b}</span></div></li>`).join('');
+})();
+
+// ---------------- altitude strip ----------------
+(function altitude() {
+  const svg = $('altSvg'), W = 1000, H = 220, L = 46, R = 12, T = 12, B = 26, pw = W - L - R, ph = H - T - B;
+  const tMax = ROUTE.pts[ROUTE.pts.length - 1][3], zMax = 21000;
+  const X = t => L + t / tMax * pw, Y = z => T + ph - z / zMax * ph;
+  const muted = css('--muted'), line = css('--line'), mono = css('--f-mono');
+  el('rect', { x: L, y: Y(13000), width: pw, height: Y(8000) - Y(13000), fill: css('--accent'), opacity: .1 }, svg);
+  txt(svg, L + 6, Y(13000) + 13, 'jet-stream band', { fill: muted, 'font-size': 11, 'font-family': mono });
+  for (let z = 0; z <= 20; z += 5) {
+    el('line', { x1: L, x2: L + pw, y1: Y(z * 1000), y2: Y(z * 1000), stroke: line }, svg);
+    txt(svg, L - 8, Y(z * 1000) + 4, `${z} km`, { 'text-anchor': 'end', fill: muted, 'font-size': 11, 'font-family': mono });
+  }
+  for (let m = 0; m <= tMax / 60; m += 30) txt(svg, X(m * 60), H - 6, `${m} min`, { 'text-anchor': 'middle', fill: muted, 'font-size': 11, 'font-family': mono });
+  let seg = [], col = null;
+  const flush = () => { if (seg.length > 1) el('polyline', { points: seg.join(' '), fill: 'none', stroke: col, 'stroke-width': 2.4, 'stroke-linejoin': 'round' }, svg); };
+  ROUTE.pts.forEach(p => { const c = css(PH[p[4]] || '--ph-climb'); if (c !== col) { flush(); seg = seg.length ? [seg[seg.length - 1]] : []; col = c; } seg.push(`${X(p[3])},${Y(p[2])}`); });
+  flush();
+  STOPS.forEach(s => {
+    el('line', { x1: X(s.t), x2: X(s.t), y1: T, y2: Y(s.bal[2]) - 10, stroke: css('--fg'), 'stroke-dasharray': '2 3', opacity: .6 }, svg);
+    el('rect', { x: X(s.t) - 8, y: Y(s.bal[2]) - 8, width: 16, height: 16, rx: 3, fill: css('--fg'), stroke: css('--bg'), 'stroke-width': 2 }, svg);
+    txt(svg, X(s.t), Y(s.bal[2]) + 4, s.id, { 'text-anchor': 'middle', fill: css('--bg'), 'font-size': 11, 'font-weight': 700, 'font-family': mono });
+  });
+  const cross = el('line', { x1: 0, x2: 0, y1: T, y2: T + ph, stroke: muted, visibility: 'hidden' }, svg);
+  const dot = el('circle', { r: 4.5, fill: css('--fg'), stroke: css('--bg'), 'stroke-width': 2, visibility: 'hidden' }, svg);
+  const tip = $('altTip');
+  const NAMES = {1: 'climb', 5: 'climb to 20 km', 4: 'jet-stream ride', 6: 'loiter', 2: 'descent', 3: 'landed'};
+  svg.addEventListener('mousemove', e => {
+    const r = svg.getBoundingClientRect(), x = (e.clientX - r.left) / r.width * W;
+    if (x < L || x > L + pw) { cross.setAttribute('visibility', 'hidden'); dot.setAttribute('visibility', 'hidden'); tip.hidden = true; return; }
+    const t = (x - L) / pw * tMax; let best = ROUTE.pts[0];
+    for (const p of ROUTE.pts) if (Math.abs(p[3] - t) < Math.abs(best[3] - t)) best = p;
+    cross.setAttribute('x1', X(best[3])); cross.setAttribute('x2', X(best[3])); cross.setAttribute('visibility', 'visible');
+    dot.setAttribute('cx', X(best[3])); dot.setAttribute('cy', Y(best[2])); dot.setAttribute('visibility', 'visible');
+    tip.hidden = false; tip.style.left = (X(best[3]) / W * r.width + svg.offsetLeft) + 'px'; tip.style.top = (Y(best[2]) / H * r.height + svg.offsetTop) + 'px';
+    tip.textContent = `${fmtT(best[3])} · ${km(best[2])} km · ${NAMES[best[4]] || ''}`;
+  });
+  svg.addEventListener('mouseleave', () => { cross.setAttribute('visibility', 'hidden'); dot.setAttribute('visibility', 'hidden'); tip.hidden = true; });
+})();
+
+// ---------------- camera viewer ----------------
+const show = { veh: true, infra: true, airsea: true, other: false };
+let cur = STOPS[0], hover = null;
+const imgs = {};
+for (const k in SCENES) { const im = new Image(); im.onload = () => { if (String(cur.id) === k) drawFeed(); }; im.src = SCENES[k].img; imgs[k] = im; }
+$('tabs').innerHTML = STOPS.map(s => `<button class="tab" role="tab" id="tab${s.id}" aria-selected="${s === cur}"><span class="stopno">${s.id}</span>${s.name}<span class="t">${fmtT(s.t)}</span></button>`).join('');
+STOPS.forEach(s => { $('tab' + s.id).onclick = () => pick(s); });
+$('cats').innerHTML = Object.entries(CAT).map(([k, [nm, c]]) => `<label class="cat"><input type="checkbox" id="cat-${k}" ${show[k] ? 'checked' : ''}><span><i class="dot" style="color:var(${c})"></i>${nm}</span></label>`).join('');
+Object.keys(CAT).forEach(k => { $('cat-' + k).onchange = e => { show[k] = e.target.checked; renderScene(); }; });
+function pick(s) { cur = s; hover = null; STOPS.forEach(b => $('tab' + b.id).setAttribute('aria-selected', b === s)); renderScene(); }
+
+const scene = () => SCENES[cur.id];
+function visible() { const S = scene(); return S ? S.dets.filter(d => show[CLS[d[5]][1]]) : []; }
+function summary(S) {
+  const counts = {}; S.dets.forEach(d => { if (CLS[d[5]][1] !== 'other') counts[d[5]] = (counts[d[5]] || 0) + 1; });
+  return Object.entries(counts).sort((a, b) => b[1] - a[1]).map(([c, n]) => `${n} ${n === 1 ? CLS[c][0].toLowerCase().replace(' / bus', '') : PLURAL[c]}`);
+}
+function renderScene() {
+  const S = scene(), v = visible(), cam = ROUTE.camera;
+  const fw = cam.sensor[0] * cur.gsd, fh = cam.sensor[1] * cur.gsd;
+  $('hudName').textContent = `Stop ${cur.id} · ${cur.name}`;
+  $('hudTime').textContent = `${fmtT(cur.t)}:${String(cur.t % 60).padStart(2, '0')} · gimbal ${cur.offnadir < 12 ? 'nadir' : cur.offnadir + '° off-nadir'} · north up`;
+  $('hudGeo').textContent = `ALT ${km(cur.bal[2])} km · SLANT ${km(cur.slant)} km · ${cur.gsd.toFixed(2)} m/px`;
+  $('hudCount').textContent = S ? `${v.length} objects` : 'no picture yet';
+  $('wait').hidden = !!S; $('cross').hidden = !S;
+  if (!S) $('wait').innerHTML = `<b>No picture yet</b><p>The camera will look at ${cur.look}, ${(fw / 1000).toFixed(2)} × ${(fh / 1000).toFixed(2)} km around this spot.</p><p>On your laptop, double-click <code>vision\\make_storyboard.bat</code> to take this picture from the real satellite imagery.</p>`;
+  if (S) {
+    const counts = {}; S.dets.forEach(d => { counts[d[5]] = (counts[d[5]] || 0) + 1; });
+    const rows = Object.entries(counts).sort((a, b) => b[1] - a[1]), mx = Math.max(1, ...rows.map(r => r[1]));
+    $('find').innerHTML = rows.length ? rows.map(([c, n]) => { const [nm, cat] = CLS[c], col = `var(${CAT[cat][1]})`, off = !show[cat];
+      return `<li style="opacity:${off ? .45 : 1}"><i class="dot" style="color:${col}"></i><span>${nm}${off ? ' <span style="color:var(--muted);font-size:12px">(hidden)</span>' : ''}</span><span class="n">${n}</span><span class="bar" style="color:${col}"><i style="width:${(n / mx * 100).toFixed(1)}%"></i></span></li>`; }).join('')
+      : '<li style="display:block"><span class="empty">Nothing detected in this frame.</span></li>';
+    const main = summary(S).slice(0, 3);
+    $('reportLine').textContent = `${fmtT(cur.t)} · Stop ${cur.id}, ${cur.name}: ${main.length ? main.join(', ') : 'nothing found'} in a ${cur.offnadir < 12 ? 'nadir' : 'gimbal'} picture from ${km(cur.bal[2])} km.`;
+  } else {
+    $('find').innerHTML = '<li style="display:block"><span class="empty">Listed here once the picture is made.</span></li>';
+    $('reportLine').textContent = `${fmtT(cur.t)} · Stop ${cur.id}, ${cur.name}: filled in from the detector once the picture is made.`;
+  }
+  const c = S ? S.center : [cur.lat, cur.lon];
+  $('geoKv').innerHTML = `<dt>Place</dt><dd>${cur.place}</dd>`
+    + `<dt>Position</dt><dd>${c[0].toFixed(5)}, ${c[1].toFixed(5)} · <a href="${gmaps(c[0], c[1], Math.max(fw, 600) * 1.6)}" target="_blank" rel="noopener">check on Google Maps</a></dd>`
+    + `<dt>Balloon</dt><dd>${km(cur.bal[2])} km up, ${km(cur.off_m)} km away</dd>`
+    + `<dt>Picture</dt><dd>${(fw / 1000).toFixed(2)} × ${(fh / 1000).toFixed(2)} km</dd>`
+    + (S ? `<dt>Satellite</dt><dd>${S.source_mpp.toFixed(2)} m/px source</dd><dt>Framing</dt><dd>${S.shift_m < 30 ? 'on the planned point' : `moved ${S.shift_m} m to the busiest spot`}</dd>` : `<dt>Looking for</dt><dd style="font-family:var(--f-body)">${cur.look}</dd>`);
+  drawFeed();
+}
+function corners(d, k) {
+  const [cx, cy, w, h, , , a] = d, c = Math.cos(a), s = Math.sin(a);
+  return [[-w / 2, -h / 2], [w / 2, -h / 2], [w / 2, h / 2], [-w / 2, h / 2]].map(([x, y]) => [(cx + x * c - y * s) * k, (cy + x * s + y * c) * k]);
+}
+function drawFeed() {
+  const c = $('feedCanvas'), dpr = devicePixelRatio || 1, W = c.clientWidth, H = c.clientHeight;
+  if (!W || !H) return;
+  if (c.width !== Math.round(W * dpr)) { c.width = Math.round(W * dpr); c.height = Math.round(H * dpr); }
+  const g = c.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, W, H);
+  const im = imgs[cur.id]; if (!im || !im.complete || !scene()) return;
+  g.drawImage(im, 0, 0, W, H);
+  const k = W / 1280, many = visible().length > 60;
+  visible().forEach(d => {
+    const p = corners(d, k), col = css(CAT[CLS[d[5]][1]][1]);
+    g.beginPath(); p.forEach(([x, y], i) => i ? g.lineTo(x, y) : g.moveTo(x, y)); g.closePath();
+    g.strokeStyle = 'rgba(0,0,0,.65)'; g.lineWidth = 3.4; g.stroke();
+    g.strokeStyle = col; g.lineWidth = d === hover ? 3 : 1.7; g.stroke();
+    if (!many || d === hover) {
+      const lbl = `${CLS[d[5]][0]} ${Math.round(d[4] * 100)}%`;
+      g.font = `500 11px ${css('--f-mono')}`; const tw = g.measureText(lbl).width;
+      const x = Math.min(W - tw - 6, Math.max(2, d[0] * k - tw / 2 - 3)), y = Math.max(14, Math.min(...p.map(q => q[1])) - 4);
+      g.fillStyle = 'rgba(10,14,18,.8)'; g.fillRect(x, y - 12, tw + 6, 15);
+      g.fillStyle = col; g.fillRect(x, y - 12, 2, 15);
+      g.fillStyle = '#f2f5f8'; g.fillText(lbl, x + 4, y);
+    }
+  });
+  // scale bar, bottom right above the HUD
+  const mpp = cur.gsd * ROUTE.camera.sensor[0] / W;
+  const len = [10, 20, 50, 100, 200, 500].find(m => m / mpp >= 70) || 500, px = len / mpp;
+  const x1 = W - 14, y1 = H - 34;
+  g.strokeStyle = 'rgba(0,0,0,.7)'; g.lineWidth = 5; g.beginPath(); g.moveTo(x1 - px, y1); g.lineTo(x1, y1); g.stroke();
+  g.strokeStyle = '#f2f5f8'; g.lineWidth = 2; g.beginPath(); g.moveTo(x1 - px, y1 - 4); g.lineTo(x1 - px, y1); g.lineTo(x1, y1); g.lineTo(x1, y1 - 4); g.stroke();
+  g.font = `500 11px ${css('--f-mono')}`; g.fillStyle = '#f2f5f8'; g.textAlign = 'right'; g.shadowColor = '#000'; g.shadowBlur = 3;
+  g.fillText(`${len} m`, x1, y1 - 7); g.textAlign = 'start'; g.shadowBlur = 0;
+}
+function inPoly(x, y, p) { let ins = false; for (let i = 0, j = p.length - 1; i < p.length; j = i++) { const [xi, yi] = p[i], [xj, yj] = p[j]; if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) ins = !ins; } return ins; }
+$('feedCanvas').addEventListener('mousemove', e => {
+  const c = $('feedCanvas'), k = c.clientWidth / 1280, x = e.offsetX, y = e.offsetY;
+  let h = null; for (const d of visible()) if (inPoly(x, y, corners(d, k))) { h = d; break; }
+  if (h !== hover) { hover = h; drawFeed(); }
+  const tip = $('feedTip');
+  if (h) { tip.hidden = false; tip.style.left = x + 'px'; tip.style.top = (y - 6) + 'px'; tip.textContent = `${CLS[h[5]][0]} · ${Math.round(h[4] * 100)}% · ${h[7].toFixed(5)}, ${h[8].toFixed(5)}`; }
+  else tip.hidden = true;
+});
+$('feedCanvas').addEventListener('mouseleave', () => { hover = null; $('feedTip').hidden = true; drawFeed(); });
+addEventListener('resize', drawFeed);
+renderScene();
+
+// ---------------- report table ----------------
+(function report() {
+  const rows = [];
+  STOPS.forEach(s => {
+    const S = SCENES[s.id], head = i => `<td class="num" style="text-align:left">${i ? '' : fmtT(s.t)}</td><td>${i ? '' : `<span class="stopno">${s.id}</span>${s.name}`}</td>`;
+    if (!S) { rows.push(`<tr>${head(0)}<td class="dim">made with the picture</td><td class="num dim">–</td><td class="num dim">–</td></tr>`); return; }
+    const g = {};
+    S.dets.forEach(d => { if (CLS[d[5]][1] === 'other') return; const r = g[d[5]] || (g[d[5]] = { n: 0, best: 0 }); r.n++; r.best = Math.max(r.best, d[4]); });
+    const top = Object.entries(g).sort((x, y) => y[1].n - x[1].n).slice(0, 3);
+    if (!top.length) { rows.push(`<tr>${head(0)}<td class="dim">nothing found</td><td class="num dim">0</td><td class="num dim">–</td></tr>`); return; }
+    top.forEach(([c, r], i) => rows.push(`<tr>${head(i)}<td><i class="dot" style="display:inline-block;margin-right:7px;color:var(${CAT[CLS[c][1]][1]})"></i>${CLS[c][0]}</td><td class="num">${r.n}</td><td class="num">${Math.round(r.best * 100)}%</td></tr>`));
+  });
+  $('repBody').innerHTML = rows.join('');
+})();
+</script>

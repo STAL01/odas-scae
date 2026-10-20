@@ -1,0 +1,2777 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HAB-RECON Ground Station</title>
+<!--
+  HAB-RECON ground station dashboard
+  - Open in Chrome or Edge (needs Web Serial). Double-click the file, or serve it:
+        python -m http.server 8000   ->  http://localhost:8000/dashboard.html
+  - "Connect ground station" -> pick the XIAO ESP32-C6's serial port.
+  - "Demo mode" runs the whole thing with no hardware (backup for the pitch).
+  - Map tiles need internet. Open the page once at the venue and zoom around
+    your area so the tiles are cached. Without Leaflet it falls back to a grid map.
+  - Mission planner: a wind matrix (31 x 31 points, every 20 km, 0-30 km altitude,
+    0-12 h) and the balloon equation of motion with a vent valve and ballast.
+    "Set target" on the map -> the plan rides the jet stream there, climbs to
+    20 km over the target and loiters. Demo mode flies the same mission live.
+  - Camera + detection: double-click vision\start_vision.bat (Windows) and open
+    http://localhost:8765 (or keep this file open). "Camera · recon" tab: the balloon
+    camera picture made from satellite imagery, every detection in a rotated box with
+    its coordinates on the map.
+  - Recon stops (default mission Sofia -> Ruse Airport): numbered places on the map the
+    gimbal camera photographs as the balloon passes within 15 km. "Add stop", drag a
+    number to move it. "Intel report" tab: one line per picture, CSV and KML export.
+-->
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+:root{
+  --bg:#0c1016; --panel:#141a22; --panel-2:#1a222c; --line:#253140; --line-2:#31404f;
+  --text:#e9eef3; --text-2:#aab5c1; --muted:#7a8794;
+  --accent:#3987e5; --track:#3987e5; --predict:#9085e9; --launch:#199e70; --det:#d95926;
+  --good:#2fb36b; --warn:#e0a100; --bad:#e5534b;
+  --sky:#2c5d8f; --ground:#7a5530;
+  --mono: ui-monospace, "SF Mono", "Cascadia Mono", Consolas, "Roboto Mono", monospace;
+  color-scheme: dark;
+}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--text);font:14px/1.4 "Inter",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  display:grid;grid-template-rows:auto 1fr;overflow:hidden}
+button{font:inherit}
+.mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
+
+/* ---------- header ---------- */
+.top{display:flex;align-items:center;gap:20px;padding:10px 16px;border-bottom:1px solid var(--line);background:#0f141b}
+.brand{display:flex;align-items:center;gap:10px;min-width:0}
+.brand svg{flex:none}
+.title{font-weight:700;letter-spacing:.08em;font-size:15px}
+.sub{color:var(--muted);font-size:12px;white-space:nowrap}
+.status{display:flex;align-items:center;gap:8px;margin-left:auto;flex-wrap:wrap}
+.pill{display:inline-flex;align-items:center;gap:7px;padding:5px 10px;border:1px solid var(--line-2);border-radius:999px;
+  font-size:12px;font-weight:600;letter-spacing:.04em;color:var(--text-2);background:var(--panel)}
+.pill .dot{width:8px;height:8px;border-radius:50%;background:var(--muted)}
+.pill.good{color:var(--text)} .pill.good .dot{background:var(--good);box-shadow:0 0 0 3px rgba(47,179,107,.18)}
+.pill.warn .dot{background:var(--warn)} .pill.bad .dot{background:var(--bad)}
+.met{font-family:var(--mono);font-size:20px;font-weight:600;padding:0 6px;font-variant-numeric:tabular-nums}
+.actions{display:flex;gap:8px}
+.btn{background:var(--panel-2);color:var(--text);border:1px solid var(--line-2);border-radius:8px;padding:8px 14px;cursor:pointer;font-weight:600}
+.btn:hover{border-color:#4a5b6e;background:#212b37}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.btn.primary:hover{background:#4a95ee}
+.btn.small{padding:6px 10px;font-size:12px}
+.btn.active{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent)}
+.btn.danger{border-color:#6b2f2c}
+.btn.armed{background:var(--bad);border-color:var(--bad);color:#fff}
+
+/* ---------- layout ---------- */
+main{display:grid;grid-template-columns:minmax(0,1fr) 400px;gap:12px;padding:12px;min-height:0}
+.left{display:grid;grid-template-rows:minmax(0,1fr) 190px;gap:12px;min-height:0}
+.right{overflow-y:auto;display:flex;flex-direction:column;gap:12px;padding-right:2px;min-height:0}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 14px}
+.card-h{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;
+  font-size:11px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--text-2)}
+.hint{font-weight:500;letter-spacing:.02em;text-transform:none;color:var(--muted)}
+.badge{font-size:11px;font-weight:700;letter-spacing:.06em;padding:2px 8px;border-radius:6px;border:1px solid var(--line-2);color:var(--text-2)}
+.badge.sim{border-color:#6a5a1e;color:#e7c55b}
+.badge.real{border-color:#1f6b45;color:#6fd69b}
+
+/* ---------- map ---------- */
+.mapwrap{position:relative;border-radius:12px;overflow:hidden;border:1px solid var(--line);background:#0a0e13;min-height:260px}
+#map,#fallback{position:absolute;inset:0;width:100%;height:100%}
+.map-tools{position:absolute;left:12px;bottom:12px;z-index:500;display:flex;gap:8px;align-items:center;
+  background:rgba(12,16,22,.86);border:1px solid var(--line-2);border-radius:10px;padding:6px 8px;backdrop-filter:blur(4px)}
+.chk{display:flex;gap:6px;align-items:center;font-size:12px;color:var(--text-2);cursor:pointer;user-select:none}
+.map-legend{position:absolute;right:12px;bottom:24px;z-index:500;background:rgba(12,16,22,.86);border:1px solid var(--line-2);
+  border-radius:10px;padding:6px 10px 8px;font-size:12px;color:var(--text-2)}
+.map-legend .lg-items{display:grid;grid-template-columns:auto auto;gap:4px 14px;margin-top:4px}
+.map-legend.collapsed .lg-items{display:none}
+.lg-h{background:none;border:0;color:var(--text-2);font:700 11px/1.6 inherit;letter-spacing:.1em;text-transform:uppercase;cursor:pointer;padding:0}
+.lg-h:after{content:" ▾"} .map-legend.collapsed .lg-h:after{content:" ▸"}
+.chart-card .card-h{gap:12px;flex-wrap:nowrap}
+.chart-card .tabs{flex:none}
+#paneHint{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.map-legend span{display:flex;align-items:center;gap:8px}
+.sw-line{width:18px;height:0;border-top:3px solid var(--track);border-radius:2px}
+.sw-dash{width:18px;height:0;border-top:2px dashed var(--predict)}
+.sw-dot{width:10px;height:10px;border-radius:50%;background:var(--launch);margin:0 4px;border:2px solid #fff}
+.sw-dia{width:9px;height:9px;background:var(--det);transform:rotate(45deg);margin:0 4px;border:1.5px solid #fff}
+.sw-seg{width:18px;height:0;border-top:3.5px solid;border-radius:2px}
+.sw-free{width:18px;height:0;border-top:2px dotted #aab5c1}
+.sw-sector{width:18px;height:10px;background:rgba(201,133,0,.18);border:1px dashed #c98500;border-radius:2px}
+.sw-tgt{width:12px;height:12px;border-radius:50%;border:2px solid #e66767;margin:0 3px}
+.sw-arrow{width:18px;text-align:center;color:#f0f4f8;font-weight:700;line-height:1}
+.land-ico.grey{color:#aab5c1;font-size:14px;line-height:16px}
+.tgt-ico{width:24px;height:24px;border-radius:50%;border:2.5px solid #e66767;box-shadow:0 0 0 2px rgba(0,0,0,.45);position:relative}
+.tgt-ico:before,.tgt-ico:after{content:"";position:absolute;background:#e66767}
+.tgt-ico:before{left:50%;top:-8px;bottom:-8px;width:2px;margin-left:-1px}
+.tgt-ico:after{top:50%;left:-8px;right:-8px;height:2px;margin-top:-1px}
+.wind-canvas{position:absolute;left:0;top:0;pointer-events:none}
+.wind-panel{position:absolute;left:54px;top:10px;z-index:500;background:rgba(12,16,22,.88);border:1px solid var(--line-2);border-radius:10px;
+  padding:7px 10px;font-size:12px;color:var(--text-2);display:grid;gap:5px;max-width:calc(100% - 120px);backdrop-filter:blur(4px)}
+.wind-panel .whead{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.wind-panel .wrow{display:grid;grid-template-columns:52px minmax(80px,170px) 58px auto;align-items:center;gap:8px}
+.wind-panel input[type=range]{width:100%;accent-color:var(--accent);margin:0}
+.wind-panel .wv{color:var(--text);font-family:var(--mono);font-size:12px;font-variant-numeric:tabular-nums}
+.wcur{font-size:11px;color:var(--muted);font-family:var(--mono)} .wcur b{color:var(--text);font-weight:600}
+.mis-phase{display:flex;align-items:baseline;gap:10px;margin-bottom:10px;flex-wrap:wrap}
+.mis-phase #misPhase{font-size:18px;font-weight:700}
+.res{display:grid;grid-template-columns:56px 1fr 116px;align-items:center;gap:10px;margin-top:8px;font-size:11px;color:var(--muted)}
+.res .bar{height:6px;background:var(--panel-2);border-radius:3px;overflow:hidden}
+.res .bar i{display:block;height:100%;width:100%;background:var(--accent);border-radius:3px;transition:width .4s}
+.res span{font-family:var(--mono);color:var(--text);text-align:right;font-size:12px}
+.mis-plan{margin-top:10px;font-size:12px;color:var(--text-2);line-height:1.5}
+.mis-plan b{color:var(--text)}
+.warn-t{color:#f0c552}
+.mis-tools{display:flex;justify-content:flex-end;align-items:center;gap:8px;margin-top:10px;font-size:12px;color:var(--muted)}
+.mis-tools select{background:var(--panel-2);color:var(--text);border:1px solid var(--line-2);border-radius:6px;padding:3px 6px;font:inherit}
+.mapwrap.picking #map{cursor:crosshair}
+.pick-hint{position:absolute;top:12px;left:50%;transform:translateX(-50%);z-index:600;background:var(--accent);color:#fff;
+  padding:6px 12px;border-radius:8px;font-weight:600;font-size:13px;display:none}
+.mapwrap.picking .pick-hint{display:block}
+.leaflet-container{background:#0a0e13;font:inherit}
+.leaflet-tooltip{background:#141a22;color:var(--text);border:1px solid var(--line-2);box-shadow:none;font-size:12px}
+.leaflet-tooltip-top:before{border-top-color:var(--line-2)}
+.leaflet-control-layers,.leaflet-bar a{background:#141a22;color:var(--text);border-color:var(--line-2)!important}
+.leaflet-control-layers-expanded{color:var(--text)}
+.leaflet-control-attribution{background:rgba(12,16,22,.7)!important;color:var(--muted)!important}
+.leaflet-control-attribution a{color:var(--text-2)!important}
+.leaflet-control-scale-line{background:rgba(12,16,22,.7);color:var(--text);border-color:var(--text-2)}
+.balloon-ico{position:relative;width:40px;height:40px}
+.balloon-ico .ring{position:absolute;inset:6px;border-radius:50%;background:rgba(57,135,229,.25);border:2px solid #fff}
+.balloon-ico svg{position:absolute;inset:0;transition:transform .2s linear}
+.balloon-ico .lbl{position:absolute;left:40px;top:9px;white-space:nowrap;font:600 12px var(--mono);color:#fff;
+  background:rgba(12,16,22,.85);padding:2px 6px;border-radius:5px;border:1px solid var(--line-2)}
+.ring-lbl{font:600 11px var(--mono);color:#cfd8e2;text-shadow:0 0 3px #000,0 0 3px #000;white-space:nowrap}
+.land-ico{font:700 18px var(--mono);color:var(--predict);text-shadow:0 0 3px #000,0 0 3px #000;line-height:20px;text-align:center}
+
+/* ---------- stats ---------- */
+.hero{display:flex;align-items:baseline;gap:6px;font-family:var(--mono);font-variant-numeric:tabular-nums}
+.hero #vAlt{font-size:40px;font-weight:700;letter-spacing:-.02em}
+.hero .unit{font-size:16px;color:var(--text-2)}
+.hero-sub{color:var(--muted);font-size:12px;margin:-2px 0 12px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px 14px}
+.grid4{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.stat .k{font-size:11px;color:var(--muted);margin-bottom:2px}
+.stat .v{font-family:var(--mono);font-variant-numeric:tabular-nums;font-size:17px;font-weight:600}
+.stat .v.small{font-size:13px}
+.stat .v .u{font-size:12px;color:var(--text-2);font-weight:500;margin-left:2px}
+.att{display:flex;justify-content:space-around;margin-bottom:10px}
+.att figure{margin:0;text-align:center}
+.att figcaption{font-size:11px;color:var(--muted);margin-top:4px}
+
+/* ---------- link ---------- */
+.path{display:flex;align-items:center;gap:6px;margin-top:10px;font-size:12px;color:var(--text-2)}
+.node{padding:3px 8px;border:1px solid var(--line-2);border-radius:6px;font-weight:600}
+.node.on{border-color:var(--accent);color:var(--text)}
+.node.dim{opacity:.35;border-style:dashed}
+.hop{flex:1;height:2px;background:var(--line-2);position:relative;min-width:14px}
+.hop.on{background:var(--accent)}
+.hop.skip{position:absolute}
+.path-note{font-size:12px;color:var(--muted);margin-top:6px}
+
+/* ---------- commands ---------- */
+.cmds{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.cmd-status{margin-top:10px;font-size:12px;color:var(--text-2);min-height:18px}
+.cmd-status b{color:var(--text)}
+
+/* ---------- lists ---------- */
+.list{list-style:none;margin:0;padding:0;display:grid;gap:6px;max-height:230px;overflow-y:auto}
+.det{display:grid;grid-template-columns:auto 1fr auto;gap:2px 10px;align-items:center;padding:7px 9px;background:var(--panel-2);
+  border:1px solid var(--line);border-radius:8px;cursor:pointer}
+.det:hover{border-color:var(--line-2)}
+.det .ic{grid-row:span 2;width:10px;height:10px;background:var(--det);transform:rotate(45deg);margin:0 3px}
+.det .t1{font-weight:700;font-size:13px}
+.det .t2{font-family:var(--mono);font-size:11px;color:var(--muted);grid-column:2 / 4}
+.det .cf{font-family:var(--mono);font-size:12px;color:var(--text-2)}
+.empty{color:var(--muted);font-size:12px;padding:4px 0}
+.log li{display:grid;grid-template-columns:62px 1fr;gap:8px;font-size:12px;color:var(--text-2);padding:2px 0;border-bottom:1px solid #1b232c}
+.log li time{font-family:var(--mono);color:var(--muted)}
+.log li.good span{color:#7fdca5} .log li.warn span{color:#f0c552} .log li.bad span{color:#ff8a83}
+
+/* ---------- chart ---------- */
+.chart-card{display:flex;flex-direction:column;min-height:0;padding-bottom:8px}
+.chart-card .card-h{margin-bottom:4px}
+.chartbox{position:relative;flex:1;min-height:0}
+#altChart{position:absolute;inset:0;width:100%;height:100%}
+.tip{position:absolute;pointer-events:none;background:#0f141b;border:1px solid var(--line-2);border-radius:6px;padding:5px 8px;
+  font:12px var(--mono);color:var(--text);white-space:nowrap;transform:translate(-50%,-110%)}
+
+[hidden]{display:none!important}
+.left.tab-health{grid-template-rows:minmax(0,1fr) 350px}
+.left.tab-wind{grid-template-rows:minmax(0,1fr) 300px}
+.left.tab-cam{grid-template-rows:minmax(0,1fr) 430px}
+.cam-pane{display:grid;grid-template-columns:minmax(0,1fr) 280px;gap:12px}
+.cam-view{position:relative;min-height:0;background:#0a0e13;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+#camCanvas{position:absolute;inset:0;width:100%;height:100%;cursor:crosshair}
+.cam-empty{position:absolute;inset:0;display:grid;place-items:center;text-align:center;color:var(--muted);font-size:13px;padding:20px;line-height:1.6}
+.cam-empty code,.cam-status code{font-family:var(--mono);color:var(--text);background:var(--panel-2);padding:1px 5px;border-radius:4px;font-size:12px}
+.cam-side{display:flex;flex-direction:column;gap:8px;min-height:0;font-size:12px;color:var(--text-2)}
+.cam-status{display:flex;align-items:flex-start;gap:8px;line-height:1.4}
+.cam-status .dot{flex:none;width:8px;height:8px;border-radius:50%;background:var(--muted);margin-top:4px}
+.cam-status.on .dot{background:var(--good)} .cam-status.off .dot{background:var(--bad)}
+.cam-row{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.cam-row select{background:var(--panel-2);color:var(--text);border:1px solid var(--line-2);border-radius:6px;padding:4px 6px;font:inherit;font-size:12px}
+.cam-count{font-size:16px;font-weight:700;color:var(--text)}
+.cam-meta{font-family:var(--mono);font-size:11px;line-height:1.55;color:var(--text-2)}
+#vehList{flex:1;min-height:60px;max-height:none}
+.veh{display:grid;grid-template-columns:auto 1fr auto;gap:1px 8px;padding:5px 8px;background:var(--panel-2);border:1px solid var(--line);border-radius:7px;cursor:pointer;font-size:12px}
+.veh:hover{border-color:var(--line-2)}
+.veh .ic{grid-row:span 2;width:10px;height:10px;border-radius:50%;border:2px solid #ff8a3d;margin-top:3px}
+.veh .ic.other{border-color:#f0f4f8}
+.veh .t1{font-weight:700;color:var(--text)} .veh .cf{font-family:var(--mono);color:var(--text-2)}
+.veh .t2{grid-column:2 / 4;font-family:var(--mono);font-size:11px;color:var(--muted)}
+#windChart{position:absolute;inset:0;width:100%;height:100%}
+.tabs{display:flex;gap:4px;flex-wrap:wrap}
+.tab{background:none;border:1px solid transparent;color:var(--muted);font:700 11px/1 inherit;font-family:inherit;letter-spacing:.12em;text-transform:uppercase;padding:6px 10px;border-radius:6px;cursor:pointer}
+.tab:hover{color:var(--text)}
+.tab.on{color:var(--text);border-color:var(--line-2);background:var(--panel-2)}
+.pane{flex:1;min-height:0;position:relative}
+.health-pane{display:grid;grid-template-columns:minmax(0,1.45fr) minmax(0,1fr);gap:14px}
+.htable{overflow:auto;min-height:0}
+.htable table{width:100%;border-collapse:collapse;font:12px var(--mono);font-variant-numeric:tabular-nums}
+.htable th{position:sticky;top:0;background:var(--panel);text-align:right;font:600 10px/1.2 var(--mono);letter-spacing:.04em;color:var(--muted);padding:4px 6px;border-bottom:1px solid var(--line);white-space:nowrap}
+.htable th:first-child,.htable td:first-child{text-align:left}
+.htable td{text-align:right;padding:3px 6px;border-bottom:1px solid #1b232c;white-space:nowrap;color:var(--text-2)}
+.htable td:first-child{color:var(--text);font-family:inherit}
+.htable tbody tr{cursor:pointer}
+.htable tbody tr:hover td{background:#18202a}
+.htable tbody tr.sel td{background:rgba(57,135,229,.14)}
+.chip{display:inline-block;font:700 10px var(--mono);letter-spacing:.06em;padding:1px 6px;border-radius:4px;border:1px solid var(--line-2);color:var(--muted)}
+.chip.ok{color:#7fdca5;border-color:#1f6b45}
+.chip.warn{color:#f0c552;border-color:#6a5a1e}
+.rowsub{display:block;font-size:10px;color:var(--muted);font-weight:400;margin-top:1px}
+.chip.fault{color:#ff8a83;border-color:#6b2f2c;background:rgba(229,83,75,.12)}
+.resid{display:grid;grid-template-rows:auto minmax(0,1fr) auto;min-height:0;gap:6px}
+.resid-h{font-size:12px;color:var(--text-2)}
+.resid-h b{color:var(--text)}
+.resid-box{position:relative;min-height:0}
+#residChart{position:absolute;inset:0;width:100%;height:100%}
+.tch{font-size:12px;color:var(--text-2);line-height:1.5}
+.tch b{font-family:var(--mono);color:var(--text)}
+.hsum{display:flex;align-items:baseline;gap:10px;margin-bottom:10px;flex-wrap:wrap}
+.hsum .big{font-size:20px;font-weight:700}
+.hsum .big.ok{color:#7fdca5} .hsum .big.warn{color:#f0c552} .hsum .big.fault{color:#ff8a83}
+.calbar{height:6px;background:var(--panel-2);border-radius:3px;overflow:hidden;margin:10px 0}
+.calbar i{display:block;height:100%;width:0;background:var(--accent);transition:width .4s}
+/* ---------- recon stops, operator camera, intel report ---------- */
+.stop-ico{width:20px;height:20px;border-radius:5px;background:#e9eef3;color:#0c1016;font:700 12px/16px var(--mono);text-align:center;border:2px solid #0c1016;box-shadow:0 0 0 1.5px rgba(233,238,243,.55);cursor:grab}
+.stop-ico.done{background:#199e70;color:#fff} .stop-ico.miss{background:#6b7785;color:#fff}
+.leaflet-tooltip.stop-lbl{background:rgba(12,16,22,.82);border:1px solid var(--line-2);color:#e9eef3;font-size:12px;font-weight:600;padding:1px 6px;box-shadow:none}
+.leaflet-tooltip.stop-lbl:before{display:none}
+.sw-stop{width:13px;height:13px;border-radius:3px;background:#e9eef3;color:#0c1016;font:700 9px/13px var(--mono);text-align:center;margin:0 2px;font-style:normal}
+.stops{list-style:none;margin:0;padding:0;display:grid;gap:6px}
+.stops li{display:grid;grid-template-columns:22px minmax(0,1fr) auto 16px;gap:1px 8px;align-items:center;padding:6px 8px;background:var(--panel-2);border:1px solid var(--line);border-radius:8px;font-size:12px;cursor:pointer}
+.stops li:hover{border-color:var(--line-2)}
+.stops .no{grid-row:1 / span 2;width:20px;height:20px;border-radius:5px;background:#e9eef3;color:#0c1016;font:700 11px/20px var(--mono);text-align:center}
+.stops .no.tgt{background:none;border:2px solid #e66767;border-radius:50%;color:#e66767;line-height:16px}
+.stops li.done .no{background:#199e70;color:#fff} .stops li.out .no:not(.tgt){background:#6b7785;color:#fff}
+.stops .nm{font-weight:700;color:var(--text);font-size:13px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.stops .kd{font-weight:500;color:var(--muted);font-size:11px}
+.stops .st{font-family:var(--mono);font-size:11px;color:var(--text-2);white-space:nowrap}
+.stops li.done .st,.stops li.done .sub{color:#7fdca5} .stops li.out .sub{color:#f0c552}
+.stops .sub{grid-column:2 / 4;font-family:var(--mono);font-size:11px;color:var(--muted);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.stops .x{grid-column:4;grid-row:1 / span 2;background:none;border:0;color:var(--muted);cursor:pointer;font-size:13px;padding:0}
+.stops .x:hover{color:#ff8a83}
+.stop-form{display:grid;gap:7px;min-width:210px;font-size:12px}
+.stop-form b{font-size:13px}
+.stop-form input,.stop-form select{background:var(--panel-2);color:var(--text);border:1px solid var(--line-2);border-radius:6px;padding:5px 7px;font:inherit}
+.leaflet-popup-content-wrapper,.leaflet-popup-tip{background:#141a22;color:var(--text);border:1px solid var(--line-2);box-shadow:0 6px 24px rgba(0,0,0,.5)}
+.leaflet-popup-content{margin:10px 12px}
+.cats{display:flex;gap:4px;flex-wrap:wrap}
+.cat{display:inline-flex;align-items:center;gap:5px;background:none;border:1px solid var(--line-2);border-radius:999px;color:var(--text-2);font-size:11px;padding:2px 8px;cursor:pointer}
+.cat i{width:8px;height:8px;border-radius:2px;border:2px solid}
+.cat[aria-pressed="false"]{opacity:.45;border-style:dashed}
+.rep-pane{display:grid;grid-template-rows:auto minmax(0,1fr);gap:8px}
+.rep-tools{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px;color:var(--text-2)}
+.rep-tools .grow{flex:1;min-width:160px}
+.htable td.l,.htable th.l{text-align:left;white-space:normal;color:var(--text-2)}
+.htable tbody tr.cur td{background:rgba(57,135,229,.14)}
+.no-s{display:inline-block;width:16px;height:16px;border-radius:4px;background:#e9eef3;color:#0c1016;font:700 10px/16px var(--mono);text-align:center;margin-right:6px}
+.left.tab-rep{grid-template-rows:minmax(0,1fr) 300px}
+@media (max-width:1100px){
+  html,body{height:auto}
+  body{display:block;overflow:auto}
+  main{grid-template-columns:1fr}
+  .left{grid-template-rows:60vh 190px}
+  .left.tab-health{grid-template-rows:60vh auto}
+  .left.tab-wind{grid-template-rows:60vh 300px}
+  .left.tab-cam{grid-template-rows:60vh auto}
+  .left.tab-rep{grid-template-rows:60vh 340px}
+  .cam-pane{grid-template-columns:1fr}
+  .cam-view{height:320px}
+  .health-pane{grid-template-columns:1fr}
+  .resid-box{height:180px}
+  .right{overflow:visible}
+  .top{flex-wrap:wrap}
+}
+@media (max-width:600px){
+  main{padding:8px}
+  .sub{display:none}
+  .grid4{grid-template-columns:repeat(2,1fr)}
+  .map-legend{display:none}
+  .wind-panel{left:8px;right:8px;top:auto;bottom:58px;max-width:none}
+  .left{grid-template-rows:60vh 240px} .left.tab-wind{grid-template-rows:60vh 300px}
+  #paneHint{display:none}
+  .wind-panel .wrow{grid-template-columns:48px minmax(0,1fr) 54px auto}
+  .wcur{display:none}
+}
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <svg width="30" height="30" viewBox="0 0 32 32" aria-hidden="true">
+      <circle cx="16" cy="11" r="8" fill="none" stroke="#e9eef3" stroke-width="2"/>
+      <path d="M11 17.5 L14 24 M21 17.5 L18 24" stroke="#e9eef3" stroke-width="1.6"/>
+      <rect x="13" y="24" width="6" height="5" rx="1" fill="#3987e5"/>
+    </svg>
+    <div><div class="title">HAB-RECON <span class="badge" title="Version 3.1: recon mission Sofia → Ruse Airport · compass from the GY-91 only" style="vertical-align:2px">v3.1</span></div><div class="sub">Ground station · high-altitude balloon reconnaissance</div></div>
+  </div>
+  <div class="status">
+    <div class="pill bad" id="pillLink"><span class="dot"></span><span id="linkText">NO LINK</span></div>
+    <div class="pill" id="pillPhase">ON PAD</div>
+    <div class="met" id="met" title="Mission elapsed time">T+00:00:00</div>
+  </div>
+  <div class="actions">
+    <button id="btnConnect" class="btn primary">Connect ground station</button>
+    <button id="btnDemo" class="btn">Demo mode</button>
+  </div>
+</header>
+
+<main>
+  <section class="left">
+    <div class="mapwrap" id="mapwrap">
+      <div id="map"></div>
+      <canvas id="fallback" hidden></canvas>
+      <div class="pick-hint" id="pickHint">Click the map to set the launch site</div>
+      <div class="wind-panel" id="windPanel" aria-label="Wind layer">
+        <div class="whead"><label class="chk"><input type="checkbox" id="chkWind" checked> <b style="color:var(--text)">Wind matrix</b></label>
+          <button class="btn small" id="btnCsv" title="Download the wind matrix at this time as CSV (all altitudes)">CSV</button></div>
+        <div class="wrow"><span>Altitude</span><input type="range" id="rngAlt" min="0" max="30000" step="250" value="11000" aria-label="Wind altitude">
+          <span class="wv" id="vWindAlt">11.0 km</span><label class="chk"><input type="checkbox" id="chkAltFollow" checked> balloon</label></div>
+        <div class="wrow"><span>Time</span><input type="range" id="rngTime" min="0" max="43200" step="300" value="0" aria-label="Wind time after launch">
+          <span class="wv" id="vWindT">T+0:00</span><label class="chk"><input type="checkbox" id="chkTimeFollow" checked> flight</label></div>
+        <div class="wcur" id="windCur">Point at the map to read the wind there</div>
+      </div>
+      <div class="map-tools">
+        <button id="btnSetLaunch" class="btn small">Set launch site</button>
+        <button id="btnSetTarget" class="btn small">Set target</button>
+        <button id="btnAddStop" class="btn small" title="Click the map where the camera should look">Add stop</button>
+        <button id="btnFit" class="btn small">Fit flight</button>
+        <label class="chk"><input type="checkbox" id="chkFollow" checked> Follow</label>
+      </div>
+      <div class="map-legend" id="legend" aria-label="Map legend">
+        <button class="lg-h" id="lgToggle" aria-expanded="true">Legend</button>
+        <div class="lg-items">
+        <span><i class="sw-line"></i>Flight track</span>
+        <span><i class="sw-seg" style="border-color:#199e70"></i>Plan: climb</span>
+        <span><i class="sw-dash"></i>Predicted path</span>
+        <span><i class="sw-seg" style="border-color:#c98500"></i>Plan: jet-stream ride</span>
+        <span><i class="sw-dot"></i>Launch site</span>
+        <span><i class="sw-seg" style="border-color:#d55181"></i>Plan: loiter at 20 km</span>
+        <span><i class="sw-tgt"></i>Target · camera footprint</span>
+        <span><i class="sw-seg" style="border-color:#9085e9"></i>Plan: descent</span>
+        <span><i class="sw-dia"></i>Detection</span>
+        <span><i class="sw-sector"></i>Reachable via jet stream</span>
+        <span><i class="sw-arrow">→</i>Wind · length = speed</span>
+        <span><i class="sw-free"></i>No altitude control</span>
+        <span><i class="sw-stop">1</i>Recon stop · drag to move</span>
+        </div>
+      </div>
+    </div>
+    <div class="card chart-card">
+      <div class="card-h">
+        <div class="tabs" role="tablist">
+          <button class="tab on" id="tabAlt" role="tab" aria-selected="true">Altitude</button>
+          <button class="tab" id="tabWind" role="tab" aria-selected="false">Wind profile</button>
+          <button class="tab" id="tabCam" role="tab" aria-selected="false">Camera · recon</button>
+          <button class="tab" id="tabRep" role="tab" aria-selected="false">Intel report</button>
+          <button class="tab" id="tabHealth" role="tab" aria-selected="false" title="GY-91 vs F405">Sensor error</button>
+        </div>
+        <span class="hint" id="paneHint">grey dashed = mission plan · amber band = jet stream</span>
+      </div>
+      <div class="pane chartbox" id="paneAlt"><canvas id="altChart" aria-label="Altitude versus mission time"></canvas><div id="altTip" class="tip" hidden></div></div>
+      <div class="pane cam-pane" id="paneCam" hidden>
+        <div class="cam-view"><canvas id="camCanvas" aria-label="Simulated balloon camera picture with the detections in boxes"></canvas>
+          <div class="cam-empty" id="camEmpty">Checking for the vision server…</div><div id="camTip" class="tip" hidden></div></div>
+        <div class="cam-side">
+          <div class="cam-status" id="visState"><span class="dot"></span><span id="visText">Vision server: checking…</span></div>
+          <div class="cam-row"><button class="btn small primary" id="btnCapture" disabled>Capture</button><button class="btn small" id="btnAim" disabled>Aim at map…</button>
+            <label class="chk" title="A picture straight down every 10 s while the balloon is above 8 km"><input type="checkbox" id="chkAuto"> every 10 s</label></div>
+          <div class="cam-row"><label for="selLens">Lens</label><select id="selLens"><option value="250" selected>250 mm · recon</option><option value="100">100 mm</option><option value="35">35 mm · wide</option></select>
+            <label class="btn small" for="fileImg" title="Run the detector on your own satellite image">Own image…</label><input type="file" id="fileImg" accept="image/*" hidden></div>
+          <div class="cam-row"><label for="selCap">Picture</label><select id="selCap" style="flex:1;min-width:0" disabled><option>no pictures yet</option></select></div>
+          <div class="cats" id="camCats" aria-label="Show these kinds of objects"></div>
+          <div class="cam-count" id="camCount">—</div>
+          <div class="cam-meta" id="camMeta"></div>
+          <ul class="list" id="vehList"></ul>
+        </div>
+      </div>
+      <div class="pane rep-pane" id="paneRep" hidden>
+        <div class="rep-tools"><span class="grow" id="repSum"></span>
+          <button class="btn small" id="btnRepCsv" title="Every detection with its position, one row each">Spreadsheet (CSV)</button>
+          <button class="btn small" id="btnRepKml" title="Opens in Google Earth: picture footprints and the shown detections pinned">Google Earth (KML)</button>
+          <button class="btn small" id="btnRepClear">Clear</button></div>
+        <div class="htable"><table>
+          <thead><tr><th>Time</th><th class="l">Stop / picture</th><th class="l">Findings</th><th>Objects</th><th>Best</th><th>Range</th><th>m/px</th></tr></thead>
+          <tbody id="repBody"></tbody>
+        </table></div>
+      </div>
+      <div class="pane chartbox" id="paneWind" hidden><canvas id="windChart" aria-label="Wind speed and wind toward the target versus altitude"></canvas><div id="windTip" class="tip" hidden></div></div>
+      <div class="pane health-pane" id="paneHealth" hidden>
+        <div class="htable">
+          <table>
+            <thead><tr><th>Channel</th><th>GY-91</th><th>F405</th><th>Δ now</th><th>Bias</th><th>σΔ live</th><th>σ GY-91</th><th>σ F405</th><th>Status</th></tr></thead>
+            <tbody id="hBody"></tbody>
+          </table>
+        </div>
+        <div class="resid">
+          <div class="resid-h" id="residTitle">Residual history</div>
+          <div class="resid-box"><canvas id="residChart" aria-label="Residual between the two sensors over the last two minutes"></canvas><div id="residTip" class="tip" hidden></div></div>
+          <div class="tch" id="tch">—</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <aside class="right">
+    <div class="card">
+      <div class="card-h"><span>Flight</span><span class="badge" id="srcBadge">NO DATA</span></div>
+      <div class="hero"><span id="vAlt">—</span><span class="unit">m</span></div>
+      <div class="hero-sub">above sea level · <span id="vAgl">—</span> above ground</div>
+      <div class="grid2">
+        <div class="stat"><div class="k">Vertical speed</div><div class="v" id="vVz">—</div></div>
+        <div class="stat"><div class="k">Distance / bearing from launch</div><div class="v" id="vDist">—</div></div>
+        <div class="stat"><div class="k">Position</div><div class="v small" id="vPos">—</div></div>
+        <div class="stat"><div class="k">Predicted landing</div><div class="v small" id="vLand">—</div></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-h"><span>Mission · jet-stream ride</span><span class="badge" id="misBadge">PLAN</span></div>
+      <div class="mis-phase"><span id="misPhase">—</span><span class="hint" id="misNote"></span></div>
+      <div class="grid2">
+        <div class="stat"><div class="k">Target</div><div class="v small" id="misTgt">—</div></div>
+        <div class="stat"><div class="k">Over the target</div><div class="v small" id="misEta">—</div></div>
+        <div class="stat"><div class="k">Riding altitude</div><div class="v" id="misRide">—</div></div>
+        <div class="stat"><div class="k">Wind toward target</div><div class="v" id="misToward">—</div></div>
+        <div class="stat"><div class="k">Free lift</div><div class="v small" id="misLift">—</div></div>
+        <div class="stat"><div class="k" id="misGsK">Ground speed</div><div class="v small" id="misGs">—</div></div>
+      </div>
+      <div class="res"><span style="text-align:left;color:var(--muted);font-family:inherit;font-size:11px">Ballast</span><div class="bar"><i id="barBallast"></i></div><span id="misBallast">—</span></div>
+      <div class="res"><span style="text-align:left;color:var(--muted);font-family:inherit;font-size:11px">Helium</span><div class="bar"><i id="barHe"></i></div><span id="misHe">—</span></div>
+      <div class="mis-plan" id="misPlan"></div>
+      <div class="mis-tools"><label for="selSpeed">Demo speed</label><select id="selSpeed"><option value="20">20×</option><option value="60" selected>60×</option><option value="120">120×</option></select></div>
+    </div>
+
+    <div class="card">
+      <div class="card-h"><span>Recon stops · gimbal camera</span><span class="hint" id="stopsHint"></span></div>
+      <ul class="stops" id="stopList"></ul>
+      <div class="mis-tools" style="justify-content:space-between">
+        <label class="chk" title="The camera turns to each stop and takes its picture when the balloon passes within 15 km"><input type="checkbox" id="chkGimbal" checked> picture at each stop</label>
+        <button class="btn small" id="btnStopsDefault" title="Sofia → Ruse Airport with the four demo stops">Default mission</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-h"><span>Command uplink</span><span class="hint">ground → payload</span></div>
+      <div class="cmds">
+        <button class="btn" id="cLaunch">Launch</button>
+        <button class="btn danger" id="cCut">Cut down</button>
+        <button class="btn" id="cReset">Reset to pad</button>
+        <button class="btn" id="cCal">Calibrate compass</button>
+      </div>
+      <div class="cmd-status" id="cmdStatus">No commands sent.</div>
+    </div>
+
+    <div class="card">
+      <div class="card-h"><span>Sensor health · 2 chains</span><span class="badge" id="fcBadge">F405 —</span></div>
+      <div class="hsum"><span class="big" id="hSummary">No data</span><span class="hint" id="hCounts"></span></div>
+      <div class="grid3">
+        <div class="stat"><div class="k">GPS (F405)</div><div class="v small" id="vGps">—</div></div>
+        <div class="stat"><div class="k">F405 power</div><div class="v small" id="vBatt">—</div></div>
+        <div class="stat"><div class="k">MAVLink</div><div class="v small" id="vMav">—</div></div>
+      </div>
+      <div class="calbar"><i id="calBar"></i></div>
+      <button class="btn" id="cCalSensors" style="width:100%">Calibrate sensors · keep still 20 s</button>
+      <div class="cmd-status" id="calStatus">Measures each sensor's bias and noise, then watches the error between them.</div>
+    </div>
+
+    <div class="card">
+      <div class="card-h"><span>Attitude · fused</span><span class="hint" id="magNote"></span></div>
+      <div class="att">
+        <figure><svg id="adi" width="128" height="128" viewBox="-64 -64 128 128" role="img" aria-label="Artificial horizon"></svg><figcaption>Horizon</figcaption></figure>
+        <figure><svg id="compass" width="128" height="128" viewBox="-64 -64 128 128" role="img" aria-label="Compass"></svg><figcaption>Heading (magnetic)</figcaption></figure>
+      </div>
+      <div class="grid4">
+        <div class="stat"><div class="k">Roll</div><div class="v" id="vRoll">—</div></div>
+        <div class="stat"><div class="k">Pitch</div><div class="v" id="vPitch">—</div></div>
+        <div class="stat"><div class="k">Heading</div><div class="v" id="vHdg">—</div></div>
+        <div class="stat"><div class="k">G-load</div><div class="v" id="vG">—</div></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-h"><span>Atmosphere · fused</span><span class="hint">BMP280 + DPS310</span></div>
+      <div class="grid3">
+        <div class="stat"><div class="k">Pressure</div><div class="v" id="vP">—</div></div>
+        <div class="stat"><div class="k">Temperature</div><div class="v" id="vT">—</div></div>
+        <div class="stat"><div class="k">Baro height Δ</div><div class="v" id="vBaro">—</div></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-h"><span>Radio link</span><span class="hint" id="linkKind">ESP-NOW · 2.4 GHz</span></div>
+      <div class="grid3">
+        <div class="stat"><div class="k">Signal</div><div class="v" id="vRssi">—</div></div>
+        <div class="stat"><div class="k">Packets / s</div><div class="v" id="vRate">—</div></div>
+        <div class="stat"><div class="k">Packet loss</div><div class="v" id="vLoss">—</div></div>
+      </div>
+      <div class="path" aria-label="Packet path">
+        <span class="node" id="nPay">PAYLOAD</span><span class="hop" id="h1"></span>
+        <span class="node" id="nRel">RELAY</span><span class="hop" id="h2"></span>
+        <span class="node" id="nGnd">GROUND</span>
+      </div>
+      <div class="path-note" id="pathNote">Waiting for packets…</div>
+    </div>
+
+    <div class="card">
+      <div class="card-h"><span>Detections · camera</span><span class="hint" id="detCount">0</span></div>
+      <ul class="list" id="detList"><li class="empty">No detections yet. Camera results appear here and on the map.</li></ul>
+    </div>
+
+    <div class="card">
+      <div class="card-h"><span>Event log</span></div>
+      <ul class="list log" id="log"></ul>
+    </div>
+  </aside>
+</main>
+
+<script>
+// =====================================================================
+//  CONFIG - keep in sync with payload_s3.ino
+// =====================================================================
+const CFG = {
+  BURST_ALT_M: 20000,
+  ASCENT_RATE: 5,
+  DEFAULT_LAUNCH: [42.6567, 23.3553],   // TU Sofia
+  LAUNCH_ALT_M: 590,
+  DEMO_SIM_SPEED: 20,
+  CAM_HFOV: 60, CAM_VFOV: 40,
+  RINGS_KM: [25, 50, 100],
+};
+const LABELS = ['object', 'person', 'vehicle', 'drone', 'target'];
+const PHASES = ['ON PAD', 'ASCENT', 'DESCENT', 'LANDED', 'JET RIDE', 'CLIMB TO 20 KM', 'LOITER'];   // 4-6: mission phases (demo)
+const FLAG = { GPS_REAL: 1, GPS_SIM: 2, MAG_OK: 4, BARO_OK: 8, IMU_OK: 16, MAG_CAL: 32, FREEFALL: 64, SHOCK: 128 };
+const CMD = { LAUNCH: 1, CUTDOWN: 2, RESET: 3, CAL_MAG: 4, SET_LAUNCH: 5, CAL_SENSORS: 6 };
+const CMD_NAME = { 1: 'LAUNCH', 2: 'CUT-DOWN', 3: 'RESET', 4: 'CALIBRATE COMPASS', 5: 'SET LAUNCH SITE', 6: 'CALIBRATE SENSORS' };
+// sensor-health channels (same order and scaling as protocol.h). vd/ed: int16 divisors, warn/fault: floors in error units
+const HFLAG = { FC: 1, GY: 2, CAL: 4, CALIB: 8, TCH: 16, GPS3D: 32, FCMAG: 64, INAV: 128 };
+const HSTAT = ['no data', 'not calibrated', 'OK', 'WARN', 'FAULT'];
+const HCH = [
+  { name: 'Pressure',    vu: 'hPa', vd: 10,   vf: 2, eu: 'Pa',  ed: 10,  ef: 1, warn: 40,  fault: 120 },
+  { name: 'Temperature', vu: '°C',  vd: 100,  vf: 2, eu: '°C',  ed: 100, ef: 2, warn: 2,   fault: 5 },
+  { name: 'Roll',        vu: '°',   vd: 100,  vf: 1, eu: '°',   ed: 100, ef: 2, warn: 3,   fault: 8 },
+  { name: 'Pitch',       vu: '°',   vd: 100,  vf: 1, eu: '°',   ed: 100, ef: 2, warn: 3,   fault: 8 },
+  { name: 'Heading',     vu: '°',   vd: 100,  vf: 1, eu: '°',   ed: 100, ef: 2, warn: 15,  fault: 40, hdg: true },
+  { name: 'Gyro X',      vu: '°/s', vd: 10,   vf: 1, eu: '°/s', ed: 100, ef: 2, warn: 5,   fault: 15 },
+  { name: 'Gyro Y',      vu: '°/s', vd: 10,   vf: 1, eu: '°/s', ed: 100, ef: 2, warn: 5,   fault: 15 },
+  { name: 'Gyro Z',      vu: '°/s', vd: 10,   vf: 1, eu: '°/s', ed: 100, ef: 2, warn: 5,   fault: 15 },
+  { name: 'Accel X',     vu: 'g',   vd: 1000, vf: 3, eu: 'mg',  ed: 10,  ef: 1, warn: 50,  fault: 150 },
+  { name: 'Accel Y',     vu: 'g',   vd: 1000, vf: 3, eu: 'mg',  ed: 10,  ef: 1, warn: 50,  fault: 150 },
+  { name: 'Accel Z',     vu: 'g',   vd: 1000, vf: 3, eu: 'mg',  ed: 10,  ef: 1, warn: 50,  fault: 150 },
+];
+const $ = id => document.getElementById(id);
+
+// ---------------------------------------------------------------------
+//  Recon mission: Sofia -> Ruse Airport with four stops on the way
+//  (same places as vision/demo_route.json). ground = elevation, m.
+//  search = how many picture widths the camera operator looks around.
+// ---------------------------------------------------------------------
+const RECON = {
+  target: { name: 'Ruse Airport', kind: 'airport', lat: 43.6950, lon: 26.0569, ground: 180 },
+  stops: [
+    { name: 'Sofia Airport', kind: 'airport', lat: 42.6905, lon: 23.4125, ground: 531, search: 3 },
+    { name: 'Hemus motorway at Vitinya', kind: 'road', lat: 42.7814, lon: 23.7994, ground: 950, search: 3 },
+    { name: 'Lovech and the Osam bridges', kind: 'road', lat: 43.1370, lon: 24.7142, ground: 200, search: 2.5 },
+    { name: 'Levski railway junction', kind: 'rail', lat: 43.3667, lon: 25.1333, ground: 80, search: 3 },
+  ],
+};
+const GIMBAL = { range: 15000, minAgl: 6000, focal: 250, pixelUm: 3.45 };   // picture when within 15 km and 6 km up
+const KINDS = ['airport', 'road', 'rail', 'bridge', 'port', 'industry', 'other'];
+// detector classes (DOTA) -> name, category
+const DCLS = { 0: ['Plane', 'air'], 1: ['Ship', 'air'], 2: ['Storage tank', 'infra'], 3: ['Baseball field', 'other'], 4: ['Tennis court', 'other'],
+  5: ['Basketball court', 'other'], 6: ['Running track', 'other'], 7: ['Harbour', 'infra'], 8: ['Bridge', 'infra'], 9: ['Truck / bus', 'veh'],
+  10: ['Car', 'veh'], 11: ['Helicopter', 'air'], 12: ['Roundabout', 'infra'], 13: ['Football pitch', 'other'], 14: ['Swimming pool', 'other'] };
+const DPLURAL = { 0: 'planes', 1: 'ships', 2: 'storage tanks', 3: 'baseball fields', 4: 'tennis courts', 5: 'basketball courts', 6: 'running tracks',
+  7: 'harbours', 8: 'bridges', 9: 'trucks/buses', 10: 'cars', 11: 'helicopters', 12: 'roundabouts', 13: 'football pitches', 14: 'swimming pools' };
+const DCAT = { veh: ['Vehicles', '#d95926'], infra: ['Infrastructure', '#199e70'], air: ['Aircraft & ships', '#3987e5'], other: ['Sports & pools', '#8d99a6'] };
+const esc = t => String(t).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+// =====================================================================
+//  Navigation maths (same as nav_math.h)
+// =====================================================================
+const D2R = Math.PI / 180, R_E = 6371000;
+function windAt(h) {
+  let s;
+  if (h < 11000) s = 4 + 26 * (h / 11000);
+  else if (h < 20000) s = 30 - 22 * ((h - 11000) / 9000);
+  else s = 8;
+  const dir = (70 + 20 * Math.sin(h / 3000)) * D2R;
+  return [s * Math.cos(dir), s * Math.sin(dir)];
+}
+const descentRate = h => 5 * Math.exp(h / 15200);
+function offsetLatLon(lat, lon, n, e) {
+  return [lat + (n / R_E) / D2R, lon + (e / (R_E * Math.cos(lat * D2R))) / D2R];
+}
+function distBearing(a, b) {
+  const p1 = a[0] * D2R, p2 = b[0] * D2R, dp = p2 - p1, dl = (b[1] - a[1]) * D2R;
+  const h = Math.sin(dp / 2) ** 2 + Math.cos(p1) * Math.cos(p2) * Math.sin(dl / 2) ** 2;
+  const d = 2 * R_E * Math.asin(Math.min(1, Math.sqrt(h)));
+  const y = Math.sin(dl) * Math.cos(p2), x = Math.cos(p1) * Math.sin(p2) - Math.sin(p1) * Math.cos(p2) * Math.cos(dl);
+  return { d, brg: (Math.atan2(y, x) / D2R + 360) % 360 };
+}
+function bodyToWorld(bx, by, bz, r, p, y) {
+  const sr = Math.sin(r), cr = Math.cos(r), sp = Math.sin(p), cp = Math.cos(p), sy = Math.sin(y), cy = Math.cos(y);
+  return [cp * cy * bx + (sr * sp * cy - cr * sy) * by + (cr * sp * cy + sr * sy) * bz,
+          cp * sy * bx + (sr * sp * sy + cr * cy) * by + (cr * sp * sy - sr * cy) * bz,
+          -sp * bx + sr * cp * by + cr * cp * bz];
+}
+function projectToGround(u, v, hfov, vfov, r, p, y, h) {
+  if (h <= 1) return null;
+  const [n, e, d] = bodyToWorld(-2 * v * Math.tan(vfov / 2), 2 * u * Math.tan(hfov / 2), 1, r, p, y);
+  if (d < 0.05) return null;
+  return [n * h / d, e * h / d];
+}
+// integrate the wind model forward to the ground (same model as the simulator)
+function predictLanding(lat, lon, alt, phase, groundAlt) {
+  if (phase !== 1 && phase !== 2) return null;
+  let n = 0, e = 0, h = alt, ph = phase, burst = null;
+  const pts = [[lat, lon]], dt = 5;
+  for (let i = 0; i < 20000; i++) {
+    const [vn, ve] = windAt(h);
+    n += vn * dt; e += ve * dt;
+    if (ph === 1) { h += CFG.ASCENT_RATE * dt; if (h >= CFG.BURST_ALT_M) { ph = 2; burst = offsetLatLon(lat, lon, n, e); } }
+    else { h -= descentRate(h) * dt; if (h <= groundAlt) break; }
+    if (i % 10 === 0) pts.push(offsetLatLon(lat, lon, n, e));
+  }
+  const end = offsetLatLon(lat, lon, n, e);
+  pts.push(end);
+  return { end, pts, burst, burstLabel: 'Predicted burst (20 km)' };
+}
+
+// =====================================================================
+//  FLIGHT PHYSICS - standard atmosphere, wind matrix, balloon dynamics,
+//  altitude control (vent valve + ballast) and the jet-stream mission.
+//
+//  Equation of motion (vector, x = north, y = east, z = up):
+//    (m + C_a·ρ_a·V)·dv/dt = (ρ_a·V − m)·g·e_z + ½·ρ_a·C_D·A·|u − v|·(u − v)
+//    m = balloon + payload + ballast + helium,  V = m_He·R_He·T/p,  A = π·r²
+//    u = wind (u_north, u_east, w_up) from the wind matrix at (x, y, z, t)
+//  Lift of the gas does not depend on altitude:
+//    (ρ_a − ρ_He)·V = m_He·(R_He/R_air − 1) = 6.24·m_He
+// =====================================================================
+const G0 = 9.80665, R_AIR = 287.05, R_HE = 2077.1, LIFT_PER_KG_HE = R_HE / R_AIR - 1;
+
+// International Standard Atmosphere, h in m above sea level
+function isa(h) {
+  let T, p;
+  if (h < 11000) { T = 288.15 - 0.0065 * h; p = 101325 * Math.pow(T / 288.15, G0 / (R_AIR * 0.0065)); }
+  else if (h < 20000) { T = 216.65; p = 22632.06 * Math.exp(-G0 * (h - 11000) / (R_AIR * T)); }
+  else if (h < 32000) { T = 216.65 + 0.001 * (h - 20000); p = 5474.89 * Math.pow(T / 216.65, -G0 / (R_AIR * 0.001)); }
+  else { T = 228.65 + 0.0028 * (h - 32000); p = 868.02 * Math.pow(T / 228.65, -G0 / (R_AIR * 0.0028)); }
+  return { T, p, rho: p / (R_AIR * T) };
+}
+
+// balloon, payload and mission settings
+const BAL = {
+  mPayload: 1.0, mBalloon: 1.2, mBallast0: 0.6,   // kg
+  freeLift0: 1.3,                                  // kg free lift at launch -> about 5 m/s ascent
+  cd: 0.3, cAdded: 0.5, burstDiam: 8.6,            // 1200 g latex balloon
+  chuteDiam: 1.2, cdChute: 1.3,                    // parachute
+  ventMax: 0.0015, dropMax: 0.01,                  // kg/s of helium vented / ballast dropped at most
+  jetBand: [8000, 13000],                          // altitudes the controller may ride (m)
+  reconAlt: 20000,                                 // climb here over the target
+  climbReserve: 0.45,                              // kg of ballast kept for the climb to 20 km
+  climbRate: 4,                                    // m/s wanted on the climb to 20 km
+  loiterMin: 30,                                   // minutes over the target, then cut-down
+  steerEvery: 120, steerGain: 1.0, steerCostPerKm: 0.6,
+};
+BAL.mHe0 = (BAL.mPayload + BAL.mBalloon + BAL.mBallast0 + BAL.freeLift0) / LIFT_PER_KG_HE;
+
+const PH = { PAD: 0, ASCENT: 1, DESCENT: 2, LANDED: 3, JET: 4, CLIMB: 5, LOITER: 6 };
+
+// ---------------------------------------------------------------------
+//  Wind matrix W[t][z][y][x] = (u_north, u_east, w_up) in m/s
+//  x/y: ±300 km around the launch site every 20 km, z: 0-30 km every 1 km,
+//  t: 0-12 h after launch every hour. Filled from an analytic example field,
+//  then read back with quadrilinear interpolation, like a forecast grid.
+// ---------------------------------------------------------------------
+const WIND = {
+  NX: 31, NY: 31, NZ: 31, NT: 13, DX: 20000, DZ: 1000, DT: 3600,
+  origin: null, ref: null, data: null, groundAlt: 590,
+};
+WIND.half = (WIND.NX - 1) / 2;
+
+// mean wind profile (same as windAt in nav_math.h): returns [u_north, u_east]
+function meanWind(h) {
+  let s;
+  if (h < 11000) s = 4 + 26 * (Math.max(0, h) / 11000);
+  else if (h < 20000) s = 30 - 22 * ((h - 11000) / 9000);
+  else s = 8;
+  const dir = (70 + 20 * Math.sin(h / 3000)) * Math.PI / 180;
+  return [s * Math.cos(dir), s * Math.sin(dir)];
+}
+const EDDIES = [   // stream-function waves: wavelength, direction, share of the mean speed, vertical scale, phase
+  { L: 250e3, ang: 20, a: 0.10, zs: 9000, ph: 0.3 },
+  { L: 120e3, ang: 115, a: 0.07, zs: 5000, ph: 1.7 },
+  { L: 60e3, ang: 205, a: 0.04, zs: 3000, ph: 4.1 },
+];
+// example field at a point; n/e in metres from the fixed reference point, t in s after launch
+function windField(n, e, z, t, groundAlt) {
+  const [mn, me] = meanWind(z);
+  const S = Math.hypot(mn, me);
+  let un = mn, ue = me;
+  for (const m of EDDIES) {
+    const k = 2 * Math.PI / m.L, a = m.ang * Math.PI / 180, kx = k * Math.sin(a), ky = k * Math.cos(a);
+    const x = e - 0.8 * me * t, y = n - 0.8 * mn * t;                 // pattern drifts with the wind
+    const amp = m.a * S * (1 + 0.3 * Math.sin(2 * Math.PI * t / 21600 + m.ph));
+    const c = Math.cos(kx * x + ky * y + m.ph + z / m.zs);
+    ue += -(amp / k) * ky * c;                                          // u = -dψ/dy, v = dψ/dx  (no divergence)
+    un += (amp / k) * kx * c;
+  }
+  // air currents: rising / sinking cells in the lowest 2.5 km above ground
+  const zg = z - groundAlt;
+  const w = zg > 0 && zg < 2500 ? 0.8 * Math.sin(Math.PI * zg / 2500) *
+    Math.sin(2 * Math.PI * (e / 70e3 + n / 90e3) - 2 * Math.PI * t / 10800) : 0;
+  return [un, ue, w];
+}
+
+// local metres <-> lat/lon (flat earth, fine for a few hundred km)
+function llToNE(o, lat, lon) { return [(lat - o[0]) * D2R * R_E, (lon - o[1]) * D2R * R_E * Math.cos(o[0] * D2R)]; }
+
+WIND.build = function (origin, ref, groundAlt) {
+  const t0 = performance.now();
+  this.origin = origin.slice(); this.ref = ref.slice(); this.groundAlt = groundAlt;
+  const [on, oe] = llToNE(ref, origin[0], origin[1]);                 // grid origin in the fixed reference frame
+  const { NX, NY, NZ, NT, DX, DZ, DT } = this;
+  const d = this.data = new Float32Array(NT * NZ * NY * NX * 3);
+  const modes = EDDIES.map(m => { const k = 2 * Math.PI / m.L, a = m.ang * Math.PI / 180; return { m, k, kx: k * Math.sin(a), ky: k * Math.cos(a) }; });
+  let i = 0;
+  for (let it = 0; it < NT; it++) for (let iz = 0; iz < NZ; iz++) {
+    // same maths as windField(), with everything that only depends on z and t taken out of the x/y loops
+    const z = iz * DZ, t = it * DT, [mn, me] = meanWind(z), S = Math.hypot(mn, me), zg = z - groundAlt;
+    const md = modes.map(({ m, k, kx, ky }) => {
+      const amp = m.a * S * (1 + 0.3 * Math.sin(2 * Math.PI * t / 21600 + m.ph)) / k;
+      return { kx, ky, c0: m.ph + z / m.zs - kx * 0.8 * me * t - ky * 0.8 * mn * t, ue: -amp * ky, un: amp * kx };
+    });
+    const wA = zg > 0 && zg < 2500 ? 0.8 * Math.sin(Math.PI * zg / 2500) : 0, wT = 2 * Math.PI * t / 10800;
+    for (let iy = 0; iy < NY; iy++) {
+      const n = on + (iy - this.half) * DX;
+      for (let ix = 0; ix < NX; ix++) {
+        const e = oe + (ix - this.half) * DX;
+        let un = mn, ue = me;
+        for (const q of md) { const c = Math.cos(q.kx * e + q.ky * n + q.c0); ue += q.ue * c; un += q.un * c; }
+        d[i++] = un; d[i++] = ue;
+        d[i++] = wA ? wA * Math.sin(2 * Math.PI * (e / 70e3 + n / 90e3) - wT) : 0;
+      }
+    }
+  }
+  this.buildMs = performance.now() - t0;
+};
+// quadrilinear interpolation; n/e in metres from the grid origin (launch site), z m MSL, t s after launch
+WIND.sample = function (n, e, z, t, out) {
+  const { NX, NY, NZ, NT, DX, DZ, DT, data } = this;
+  const fx = Math.min(NX - 1.0001, Math.max(0, e / DX + this.half)), fy = Math.min(NY - 1.0001, Math.max(0, n / DX + this.half));
+  const fz = Math.min(NZ - 1.0001, Math.max(0, z / DZ)), ft = Math.min(NT - 1.0001, Math.max(0, t / DT));
+  const ix = fx | 0, iy = fy | 0, iz = fz | 0, it = ft | 0;
+  const ax = fx - ix, ay = fy - iy, az = fz - iz, at = ft - it;
+  let vn = 0, ve = 0, w = 0;
+  for (let ct = 0; ct < 2; ct++) {
+    const wt = ct ? at : 1 - at; if (!wt) continue;
+    for (let cz = 0; cz < 2; cz++) {
+      const wz = wt * (cz ? az : 1 - az); if (!wz) continue;
+      for (let cy = 0; cy < 2; cy++) {
+        const wy = wz * (cy ? ay : 1 - ay); if (!wy) continue;
+        const base = ((((it + ct) * NZ + iz + cz) * NY + iy + cy) * NX + ix) * 3;
+        const w0 = wy * (1 - ax), w1 = wy * ax;
+        vn += w0 * data[base] + w1 * data[base + 3];
+        ve += w0 * data[base + 1] + w1 * data[base + 4];
+        w += w0 * data[base + 2] + w1 * data[base + 5];
+      }
+    }
+  }
+  out = out || [0, 0, 0]; out[0] = vn; out[1] = ve; out[2] = w;
+  return out;
+};
+
+// ---------------------------------------------------------------------
+//  Balloon
+// ---------------------------------------------------------------------
+function newFlight(groundAlt) {
+  return { t: 0, n: 0, e: 0, z: groundAlt, vn: 0, ve: 0, vz: 0, mHe: BAL.mHe0, mBallast: BAL.mBallast0,
+    phase: PH.ASCENT, attached: true, burst: false, zSet: null, jetAlt: null, vented: 0, dropped: 0,
+    nextSteer: 0, nextCheck: 0, tPhase: 0, dMin: Infinity, unreachable: false, diam: 0, freeLift: BAL.freeLift0 };
+}
+function cloneFlight(f) { return Object.assign({}, f); }
+const geomOf = (f, atm) => {
+  const V = f.attached ? f.mHe * R_HE * atm.T / atm.p : 0, r = Math.cbrt(3 * V / (4 * Math.PI));
+  return { V, r, A: Math.PI * r * r };
+};
+const freeLift = f => f.attached ? LIFT_PER_KG_HE * f.mHe - (BAL.mBalloon + BAL.mPayload + f.mBallast)
+  : -(BAL.mPayload + f.mBallast + (f.burst ? BAL.mBalloon : 0));
+// free lift (kg) that gives vertical speed w in still air
+const liftFor = (w, atm, A) => Math.sign(w) * 0.5 * atm.rho * BAL.cd * A * w * w / G0;
+
+const _w = [0, 0, 0];
+function physicsStep(f, ctx, dt) {
+  const atm = isa(f.z), u = ctx.wind(f.n, f.e, f.z, f.t, _w);
+  let m, V, A, cd, ma;
+  if (f.attached) {
+    const g = geomOf(f, atm); V = g.V; A = g.A; cd = BAL.cd;
+    m = BAL.mBalloon + BAL.mPayload + f.mBallast + f.mHe; ma = BAL.cAdded * atm.rho * V; f.diam = 2 * g.r;
+  } else {
+    V = 0; A = Math.PI * (BAL.chuteDiam / 2) ** 2; cd = BAL.cdChute; ma = 0; f.diam = 0;
+    m = BAL.mPayload + f.mBallast + (f.burst ? BAL.mBalloon : 0);
+  }
+  const M = m + ma, buoy = (atm.rho * V - m) * G0;
+  const vrel = Math.hypot(u[0] - f.vn, u[1] - f.ve, u[2] - f.vz);
+  const c = dt * 0.5 * atm.rho * cd * A * vrel / M;           // drag handled implicitly: stable for any dt
+  f.vn = (f.vn + c * u[0]) / (1 + c);
+  f.ve = (f.ve + c * u[1]) / (1 + c);
+  f.vz = (f.vz + dt * buoy / M + c * u[2]) / (1 + c);
+  f.n += f.vn * dt; f.e += f.ve * dt; f.z += f.vz * dt; f.t += dt;
+  f.freeLift = freeLift(f);
+}
+
+// vent / ballast controller: holds f.zSet by setting the free lift for the wanted vertical speed
+function altitudeControl(f, dt) {
+  if (!f.attached || f.zSet == null) return;
+  const atm = isa(f.z), A = geomOf(f, atm).A;
+  const err = f.zSet - f.z, wMax = f.phase === PH.CLIMB ? BAL.climbRate : f.phase === PH.JET ? 1 : 2;   // gentle moves save gas and ballast
+  const wT = Math.max(-wMax, Math.min(wMax, err / 400));
+  const lo = wT - 0.3, hi = wT + 0.3 + (Math.abs(err) > 1500 ? 2 : 0);
+  const FL = freeLift(f), FLt = liftFor(wT, atm, A);
+  if (FL > liftFor(hi, atm, A)) {                                  // too much lift: open the valve
+    const dHe = Math.min(BAL.ventMax * dt, (FL - FLt) / LIFT_PER_KG_HE, f.mHe * 0.5);
+    f.mHe -= dHe; f.vented += dHe;
+  } else if (FL < liftFor(lo, atm, A)) {                           // too little: drop ballast
+    const reserve = f.phase === PH.CLIMB || f.phase === PH.LOITER ? 0 : BAL.climbReserve;
+    const drop = Math.min(BAL.dropMax * dt, FLt - FL, Math.max(0, f.mBallast - reserve));
+    if (drop > 0) { f.mBallast -= drop; f.dropped += drop; }
+  }
+}
+
+// wind component toward the target at an altitude
+function toward(f, ctx, z, en, ee) { const u = ctx.wind(f.n, f.e, z, f.t, _w); return u[0] * en + u[1] * ee; }
+function targetDir(f, ctx) {
+  const dn = ctx.target[0] - f.n, de = ctx.target[1] - f.e, d = Math.hypot(dn, de) || 1;
+  return { d, en: dn / d, ee: de / d };
+}
+// best altitude in the jet-stream band: most wind toward the target, small cost for moving
+function bestRide(f, ctx, en, ee, zFrom) {
+  let best = null;
+  for (let z = BAL.jetBand[0]; z <= BAL.jetBand[1] + 1; z += 250) {
+    const u = ctx.wind(f.n, f.e, z, f.t, _w), tw = u[0] * en + u[1] * ee, sp = Math.hypot(u[0], u[1]);
+    const s = tw - (zFrom == null ? 0 : BAL.steerCostPerKm * Math.abs(z - zFrom) / 1000);
+    if (!best || s > best.s) best = { z, s, tw, sp };
+  }
+  return best;
+}
+// how far toward the target the balloon drifts while climbing to 20 km plus half the loiter
+function climbLead(f, ctx, en, ee) {
+  let lead = 0;
+  for (let z = f.z; z < BAL.reconAlt; z += 500) lead += toward(f, ctx, Math.min(z + 250, BAL.reconAlt), en, ee) * 500 / BAL.climbRate;
+  return lead + 0.5 * BAL.loiterMin * 60 * toward(f, ctx, BAL.reconAlt, en, ee);
+}
+function setPhase(f, ctx, ph, ev, extra) {
+  f.phase = ph; f.tPhase = f.t;
+  ctx.events && ctx.events.push(Object.assign({ type: ev, t: f.t, n: f.n, e: f.e, z: f.z }, extra || {}));
+}
+function cutDown(f, ctx, why) {
+  if (!f.attached) return;
+  f.attached = false; f.zSet = null;
+  setPhase(f, ctx, PH.DESCENT, why);
+}
+
+// mission state machine: climb -> ride the jet stream -> climb to 20 km over the target -> loiter -> cut-down
+function missionStep(f, ctx) {
+  if (f.phase === PH.DESCENT) {
+    if (f.z <= ctx.groundAlt) { f.z = ctx.groundAlt; f.vn = f.ve = f.vz = 0; setPhase(f, ctx, PH.LANDED, 'land'); }
+    return;
+  }
+  if (f.phase === PH.LANDED || f.phase === PH.PAD) return;
+  if (f.attached && f.diam >= BAL.burstDiam) { f.burst = true; cutDown(f, ctx, 'burst'); return; }
+  if (!ctx.control || !ctx.target) return;                         // free balloon: just rises until it bursts
+
+  if (f.t < f.nextCheck) return;
+  f.nextCheck = f.t + 10;
+  const { d, en, ee } = targetDir(f, ctx);
+
+  if (f.phase === PH.ASCENT) {
+    if (f.jetAlt == null && f.z >= BAL.jetBand[0] - 1500) {
+      const b = bestRide(f, ctx, en, ee, null);
+      // no layer blows within 60° of the target: skip the ride, climb straight to 20 km
+      if (b.tw < Math.max(3, 0.5 * b.sp)) { f.unreachable = true; f.zSet = BAL.reconAlt; setPhase(f, ctx, PH.CLIMB, 'noride', { tw: b.tw }); return; }
+      f.jetAlt = b.z;
+    }
+    if (f.jetAlt != null && f.z >= f.jetAlt - 1200) {
+      if (d <= climbLead(f, ctx, en, ee)) { f.zSet = BAL.reconAlt; setPhase(f, ctx, PH.CLIMB, 'climb'); return; }
+      f.zSet = f.jetAlt; f.nextSteer = f.t + BAL.steerEvery;
+      setPhase(f, ctx, PH.JET, 'jet', { tw: toward(f, ctx, f.jetAlt, en, ee), ride: f.jetAlt });
+    }
+  } else if (f.phase === PH.JET) {
+    f.dMin = Math.min(f.dMin, d);
+    const passed = d > f.dMin + 15000;                              // closest approach is behind us
+    if (d <= climbLead(f, ctx, en, ee) || passed || f.t - f.tPhase > 8 * 3600) {
+      f.zSet = BAL.reconAlt; setPhase(f, ctx, PH.CLIMB, 'climb'); return;
+    }
+    if (f.t >= f.nextSteer) {
+      f.nextSteer = f.t + BAL.steerEvery;
+      const cur = toward(f, ctx, f.zSet, en, ee), b = bestRide(f, ctx, en, ee, f.zSet);
+      if (b.z !== f.zSet && b.s > cur + BAL.steerGain && f.mBallast - BAL.climbReserve > 0.06) {
+        ctx.events && ctx.events.push({ type: 'steer', t: f.t, n: f.n, e: f.e, z: f.z, from: f.zSet, to: b.z, tw: b.tw, was: cur });
+        f.zSet = b.z;
+      }
+    }
+  } else if (f.phase === PH.CLIMB) {
+    if (f.z >= BAL.reconAlt - 300) setPhase(f, ctx, PH.LOITER, 'loiter', { d });
+  } else if (f.phase === PH.LOITER) {
+    if (f.t - f.tPhase >= BAL.loiterMin * 60) cutDown(f, ctx, 'cut');
+  }
+}
+
+function flightStep(f, ctx, dt) {
+  if (f.phase === PH.PAD || f.phase === PH.LANDED) return;
+  altitudeControl(f, dt);
+  physicsStep(f, ctx, dt);
+  missionStep(f, ctx);
+}
+
+// run a flight to the ground; returns sampled points and events
+function simulate(f0, ctx, dt = 2, every = 30, tMax = 16 * 3600) {
+  const f = cloneFlight(f0), pts = [], events = (ctx.events = []);
+  let next = 0, steps = 0;
+  const t1 = f.t + tMax;
+  while (f.phase !== PH.LANDED && f.t < t1 && steps < 200000) {
+    if (f.t >= next) { pts.push([f.n, f.e, f.z, f.t, f.phase]); next = f.t + every; }
+    flightStep(f, ctx, dt); steps++;
+  }
+  pts.push([f.n, f.e, f.z, f.t, f.phase]);
+  ctx.events = null;
+  return { pts, events, end: f };
+}
+
+// =====================================================================
+//  Packet format (same as protocol.h) - 60 bytes, little-endian
+// =====================================================================
+function parseTelemetry(b) {
+  if (b.length !== 60 || b[0] !== 0xB1) return null;
+  const v = new DataView(b.buffer, b.byteOffset, b.byteLength);
+  return {
+    hops: v.getUint8(1), version: v.getUint8(2), flags: v.getUint8(3), seq: v.getUint16(4, true),
+    uptime: v.getUint32(6, true), met: v.getUint32(10, true),
+    lat: v.getInt32(14, true) / 1e7, lon: v.getInt32(18, true) / 1e7, alt: v.getInt32(22, true) / 100,
+    baroAlt: v.getInt32(26, true) / 100, press: v.getUint32(30, true), temp: v.getInt16(34, true) / 100,
+    roll: v.getInt16(36, true) / 100, pitch: v.getInt16(38, true) / 100, heading: v.getUint16(40, true) === 0xFFFF ? null : v.getUint16(40, true) / 100,
+    vz: v.getInt16(42, true) / 100, accel: v.getUint16(44, true) / 1000, phase: v.getUint8(46),
+    detLabel: v.getUint8(47), detConf: v.getUint8(48), detAge: v.getUint8(49),
+    detLat: v.getInt32(50, true) / 1e7, detLon: v.getInt32(54, true) / 1e7, ack: v.getUint16(58, true),
+  };
+}
+function encodeTelemetry(t) {
+  const b = new Uint8Array(60), v = new DataView(b.buffer), r = Math.round;
+  v.setUint8(0, 0xB1); v.setUint8(1, t.hops | 0); v.setUint8(2, 1); v.setUint8(3, t.flags);
+  v.setUint16(4, t.seq & 0xFFFF, true); v.setUint32(6, t.uptime >>> 0, true); v.setUint32(10, t.met >>> 0, true);
+  v.setInt32(14, r(t.lat * 1e7), true); v.setInt32(18, r(t.lon * 1e7), true); v.setInt32(22, r(t.alt * 100), true);
+  v.setInt32(26, r(t.baroAlt * 100), true); v.setUint32(30, r(t.press), true); v.setInt16(34, r(t.temp * 100), true);
+  v.setInt16(36, r(t.roll * 100), true); v.setInt16(38, r(t.pitch * 100), true); v.setUint16(40, t.heading == null ? 0xFFFF : r(((t.heading % 360) + 360) % 360 * 100) % 36000, true);
+  v.setInt16(42, r(t.vz * 100), true); v.setUint16(44, r(t.accel * 1000), true); v.setUint8(46, t.phase);
+  v.setUint8(47, t.detLabel | 0); v.setUint8(48, t.detConf | 0); v.setUint8(49, t.detAge ?? 255);
+  v.setInt32(50, r((t.detLat || 0) * 1e7), true); v.setInt32(54, r((t.detLon || 0) * 1e7), true); v.setUint16(58, t.ack & 0xFFFF, true);
+  return b;
+}
+// health packet (189 bytes) - see HealthPacket in protocol.h
+function parseHealth(b) {
+  if (b.length !== 189 || b[0] !== 0xB2) return null;
+  const v = new DataView(b.buffer, b.byteOffset, b.byteLength);
+  const h = { hops: v.getUint8(1), flags: v.getUint8(3), seq: v.getUint16(4, true), uptime: v.getUint32(6, true),
+    cal: v.getUint8(10), fix: v.getUint8(11), sats: v.getUint8(12), rate: v.getUint8(13),
+    battMv: v.getUint16(14, true), battCa: v.getInt16(16, true),
+    tch: [v.getInt16(18, true), v.getInt16(20, true), v.getInt16(22, true)], ch: [] };
+  for (let k = 0; k < 11; k++) {
+    const o = 24 + k * 15;
+    h.ch.push({ a: v.getInt16(o, true), b: v.getInt16(o + 2, true), bias: v.getInt16(o + 4, true), resid: v.getInt16(o + 6, true),
+      sl: v.getInt16(o + 8, true), sa: v.getInt16(o + 10, true), sb: v.getInt16(o + 12, true), st: v.getUint8(o + 14) });
+  }
+  return h;
+}
+function encodeHealth(h) {
+  const b = new Uint8Array(189), v = new DataView(b.buffer), c16 = x => Math.max(-32768, Math.min(32767, Math.round(x)));
+  v.setUint8(0, 0xB2); v.setUint8(1, h.hops | 0); v.setUint8(2, 1); v.setUint8(3, h.flags);
+  v.setUint16(4, h.seq & 0xFFFF, true); v.setUint32(6, h.uptime >>> 0, true);
+  v.setUint8(10, h.cal); v.setUint8(11, h.fix); v.setUint8(12, h.sats); v.setUint8(13, h.rate);
+  v.setUint16(14, h.battMv, true); v.setInt16(16, h.battCa, true);
+  h.tch.forEach((x, i) => v.setInt16(18 + 2 * i, c16(x), true));
+  h.ch.forEach((c, k) => { const o = 24 + k * 15;
+    ['a', 'b', 'bias', 'resid', 'sl', 'sa', 'sb'].forEach((f, i) => v.setInt16(o + 2 * i, c16(c[f]), true));
+    v.setUint8(o + 14, c.st); });
+  return b;
+}
+const toHex = b => Array.from(b, x => x.toString(16).padStart(2, '0')).join('').toUpperCase();
+function fromHex(h) {
+  if (!/^[0-9a-fA-F]*$/.test(h) || h.length % 2) return new Uint8Array(0);
+  const b = new Uint8Array(h.length / 2);
+  for (let i = 0; i < b.length; i++) b[i] = parseInt(h.substr(i * 2, 2), 16);
+  return b;
+}
+
+// =====================================================================
+//  Formatting
+// =====================================================================
+const nf0 = new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 });
+const fmtDist = m => m < 1000 ? `${nf0.format(m)}<span class="u">m</span>` : `${(m / 1000).toFixed(m < 100000 ? 1 : 0)}<span class="u">km</span>`;
+const fmtDistTxt = m => m < 1000 ? `${nf0.format(m)} m` : `${(m / 1000).toFixed(1)} km`;
+const pad = n => String(n).padStart(2, '0');
+const fmtMET = s => `T+${pad(Math.floor(s / 3600))}:${pad(Math.floor(s / 60) % 60)}:${pad(Math.floor(s) % 60)}`;
+const POINTS = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW'];
+const point = b => POINTS[Math.round(b / 22.5) % 16];
+const clock = () => new Date().toLocaleTimeString('en-GB', { hour12: false });
+
+// =====================================================================
+//  State
+// =====================================================================
+const S = {
+  source: null,            // 'serial' | 'demo' | null
+  last: null, lastRx: 0,
+  launch: CFG.DEFAULT_LAUNCH.slice(), groundAlt: CFG.LAUNCH_ALT_M,
+  track: [], alt: [],      // track: [lat,lon]; alt: [met_s, alt_m]
+  dets: [], detSig: '',
+  seen: new Map(),         // seq -> Set(hops)
+  uniq: [],                // [time, seq] unique packets in the last 10 s
+  rxTimes: [],
+  rssi: null,
+  cmdSeq: Math.floor(Math.random() * 60000) + 1, pending: null,
+  pred: null, picking: false, firstFix: true, dirty: true,
+  health: null, hRx: 0, hist: HCH.map(() => []), sel: 0, tab: 'alt',
+  target: null, plan: null,                     // mission target [lat, lon] and the planned flight
+  targetName: 'Target', targetGround: null,
+  stops: [], stopRun: {},                       // recon stops; per-flight gimbal state by stop key
+  showWind: true, windAlt: 11000, windT: 0, altFollow: true, timeFollow: true,
+};
+
+function log(msg, kind = '') {
+  const li = document.createElement('li');
+  li.className = kind;
+  li.innerHTML = `<time>${clock()}</time><span></span>`;
+  li.querySelector('span').textContent = msg;
+  const ul = $('log');
+  ul.prepend(li);
+  while (ul.children.length > 120) ul.lastChild.remove();
+}
+
+// =====================================================================
+//  Map (Leaflet, with a canvas fallback when offline)
+// =====================================================================
+let map = null, M = {};
+function initMap() {
+  if (!window.L) {
+    $('map').hidden = true;
+    $('fallback').hidden = false;
+    log('Map library not loaded (offline?) - using grid map', 'warn');
+    return;
+  }
+  map = L.map('map', { zoomControl: true, worldCopyJump: true }).setView(S.launch, 9);
+  const sat = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+    { maxZoom: 18, attribution: 'Imagery © Esri' });
+  const dark = L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
+    { maxZoom: 19, subdomains: 'abcd', attribution: '© OpenStreetMap contributors © CARTO' });
+  const osm = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+    { maxZoom: 19, attribution: '© OpenStreetMap contributors' });
+  sat.addTo(map);
+  L.control.layers({ Satellite: sat, Dark: dark, Streets: osm }, null, { position: 'topright' }).addTo(map);
+  L.control.scale({ imperial: false, position: 'topright' }).addTo(map);
+
+  M.rings = CFG.RINGS_KM.map(km => L.circle(S.launch, { radius: km * 1000, color: '#c9d4df', weight: 1, opacity: .55, dashArray: '3 7', fill: false, interactive: false }).addTo(map));
+  M.ringLbl = CFG.RINGS_KM.map(km => L.marker(offsetLatLon(S.launch[0], S.launch[1], km * 1000, 0),
+    { interactive: false, icon: L.divIcon({ className: 'ring-lbl', html: `${km} km`, iconSize: [50, 14], iconAnchor: [25, 16] }) }).addTo(map));
+  M.sector = L.layerGroup().addTo(map); M.free = L.layerGroup().addTo(map); M.plan = L.layerGroup().addTo(map);
+  M.tgtArea = L.circle(S.launch, { radius: 10000, color: '#e66767', weight: 1.5, opacity: .8, dashArray: '5 6', fillColor: '#e66767', fillOpacity: .06 })
+    .bindTooltip('Target area · camera footprint from 20 km', { sticky: true });
+  M.target = L.marker(S.launch, { zIndexOffset: 500, icon: L.divIcon({ className: '', html: '<div class="tgt-ico"></div>', iconSize: [24, 24], iconAnchor: [12, 12] }) })
+    .bindTooltip('Target', { direction: 'top', offset: [0, -10] });
+  M.track = L.polyline([], { color: '#3987e5', weight: 3, opacity: .95 }).addTo(map);
+  M.pred = L.polyline([], { color: '#9085e9', weight: 2, dashArray: '6 7', opacity: .95 }).addTo(map);
+  M.land = L.marker(S.launch, { icon: L.divIcon({ className: 'land-ico', html: '✕', iconSize: [20, 20], iconAnchor: [10, 10] }) })
+    .bindTooltip('Predicted landing', { direction: 'top' });
+  M.burst = L.circleMarker(S.launch, { radius: 5, color: '#9085e9', weight: 2, fillColor: '#141a22', fillOpacity: 1 })
+    .bindTooltip('Predicted burst (20 km)', { direction: 'top' });
+  M.launch = L.marker(S.launch, { icon: L.divIcon({ className: '', html: '<div style="width:16px;height:16px;border-radius:50%;background:#199e70;border:3px solid #fff;box-shadow:0 0 0 2px rgba(0,0,0,.35)"></div>', iconSize: [16, 16], iconAnchor: [8, 8] }) })
+    .bindTooltip('Launch site', { direction: 'top', offset: [0, -8] }).addTo(map);
+  M.balloon = L.marker(S.launch, {
+    zIndexOffset: 1000, icon: L.divIcon({
+      className: '', iconSize: [40, 40], iconAnchor: [20, 20],
+      html: `<div class="balloon-ico"><div class="ring"></div>
+        <svg viewBox="-20 -20 40 40" width="40" height="40"><path d="M0 -17 L7 -3 L0 -7 L-7 -3 Z" fill="#fff" stroke="#0c1016" stroke-width="1.2"/></svg>
+        <div class="lbl">—</div></div>`
+    })
+  }).addTo(map);
+  M.dets = L.layerGroup().addTo(map);
+  M.stops = L.layerGroup().addTo(map);
+  M.cam = L.layerGroup().addTo(map);
+  map.on('click', e => onMapPick([e.latlng.lat, e.latlng.lng]));
+}
+
+function moveLaunchGraphics() {
+  if (!map) return;
+  M.launch.setLatLng(S.launch);
+  M.rings.forEach(c => c.setLatLng(S.launch));
+  M.ringLbl.forEach((m, i) => m.setLatLng(offsetLatLon(S.launch[0], S.launch[1], CFG.RINGS_KM[i] * 1000, 0)));
+  scheduleReplan();
+}
+
+function addDetMarker(d) {
+  if (!map || !d.pos) return;
+  const icon = L.divIcon({ className: '', iconSize: [14, 14], iconAnchor: [7, 7],
+    html: '<div style="width:11px;height:11px;margin:1.5px;background:#d95926;border:1.5px solid #fff;transform:rotate(45deg)"></div>' });
+  d.marker = L.marker(d.pos, { icon }).bindTooltip(`${d.label.toUpperCase()} · ${d.conf}%<br>${d.pos[0].toFixed(5)}, ${d.pos[1].toFixed(5)}`, { direction: 'top' }).addTo(M.dets);
+}
+
+// --- fallback grid map (no internet / no Leaflet) ---
+function drawFallback() {
+  const c = $('fallback'); if (c.hidden) return;
+  const dpr = devicePixelRatio || 1, W = c.clientWidth, H = c.clientHeight;
+  if (c.width !== W * dpr || c.height !== H * dpr) { c.width = W * dpr; c.height = H * dpr; }
+  const g = c.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.fillStyle = '#0a0e13'; g.fillRect(0, 0, W, H);
+  const pts = [S.launch, ...S.track, ...(S.pred ? S.pred.pts : []), ...S.dets.filter(d => d.pos).map(d => d.pos),
+    ...(S.plan ? S.plan.pts.map(q => q.ll) : []), ...(S.target ? [S.target] : []), ...S.stops.map(s => [s.lat, s.lon])];
+  let maxR = 30000;
+  const toNE = p => { const db = distBearing(S.launch, p); return [db.d * Math.cos(db.brg * D2R), db.d * Math.sin(db.brg * D2R)]; };
+  pts.forEach(p => { const [n, e] = toNE(p); maxR = Math.max(maxR, Math.abs(n) * 1.15, Math.abs(e) * 1.15); });
+  const k = Math.min(W, H) / 2 / maxR, cx = W / 2, cy = H / 2;
+  const xy = p => { const [n, e] = toNE(p); return [cx + e * k, cy - n * k]; };
+  g.strokeStyle = '#253140'; g.lineWidth = 1; g.setLineDash([3, 6]); g.font = '11px ui-monospace,monospace'; g.fillStyle = '#7a8794';
+  [25, 50, 100, 200].forEach(km => { const r = km * 1000 * k; if (r > Math.max(W, H)) return; g.beginPath(); g.arc(cx, cy, r, 0, 7); g.stroke(); g.fillText(`${km} km`, cx + 4, cy - r - 4); });
+  g.setLineDash([]); g.fillText('N ↑', 12, 20);
+  if (S.plan) { g.lineWidth = 3; let prev = null; S.plan.pts.forEach(q => { const [x, y] = xy(q.ll); if (prev) { g.strokeStyle = PCOL[q.ph] || PCOL[1]; g.beginPath(); g.moveTo(prev[0], prev[1]); g.lineTo(x, y); g.stroke(); } prev = [x, y]; }); }
+  if (S.target) { const [x, y] = xy(S.target); g.strokeStyle = '#e66767'; g.lineWidth = 2.5; g.beginPath(); g.arc(x, y, 10, 0, 7); g.stroke(); g.beginPath(); g.arc(x, y, footprintR() * k, 0, 7); g.setLineDash([5, 6]); g.lineWidth = 1.5; g.stroke(); g.setLineDash([]); }
+  if (S.pred) { g.strokeStyle = '#9085e9'; g.setLineDash([6, 7]); g.lineWidth = 2; g.beginPath(); S.pred.pts.forEach((p, i) => { const [x, y] = xy(p); i ? g.lineTo(x, y) : g.moveTo(x, y); }); g.stroke(); g.setLineDash([]); }
+  if (S.track.length) { g.strokeStyle = '#3987e5'; g.lineWidth = 3; g.lineJoin = 'round'; g.beginPath(); S.track.forEach((p, i) => { const [x, y] = xy(p); i ? g.lineTo(x, y) : g.moveTo(x, y); }); g.stroke(); }
+  S.dets.forEach(d => { if (!d.pos) return; const [x, y] = xy(d.pos); g.save(); g.translate(x, y); g.rotate(Math.PI / 4); g.fillStyle = '#d95926'; g.fillRect(-5, -5, 10, 10); g.restore(); });
+  allStops().forEach(s => { if (s.target) return; const [x, y] = xy([s.lat, s.lon]); g.fillStyle = '#e9eef3'; g.fillRect(x - 7, y - 7, 14, 14);
+    g.fillStyle = '#0c1016'; g.font = '700 10px ui-monospace,monospace'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText(s.no, x, y + 1); g.textAlign = 'start'; g.textBaseline = 'alphabetic'; });
+  g.fillStyle = '#199e70'; g.strokeStyle = '#fff'; g.lineWidth = 2; g.beginPath(); g.arc(cx, cy, 7, 0, 7); g.fill(); g.stroke();
+  if (S.last) { const [x, y] = xy([S.last.lat, S.last.lon]); g.fillStyle = '#fff'; g.beginPath(); g.arc(x, y, 6, 0, 7); g.fill(); }
+}
+
+// =====================================================================
+//  Instruments (SVG)
+// =====================================================================
+const SVGNS = 'http://www.w3.org/2000/svg';
+function el(tag, attrs, parent) { const e = document.createElementNS(SVGNS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); parent && parent.appendChild(e); return e; }
+const PX_PER_DEG = 1.7;
+function buildInstruments() {
+  const adi = $('adi');
+  const defs = el('defs', {}, adi); const cp = el('clipPath', { id: 'adiClip' }, defs); el('circle', { r: 58 }, cp);
+  const clip = el('g', { 'clip-path': 'url(#adiClip)' }, adi);
+  const hz = el('g', { id: 'hz' }, clip);
+  el('rect', { x: -200, y: -300, width: 400, height: 300, fill: 'var(--sky)' }, hz);
+  el('rect', { x: -200, y: 0, width: 400, height: 300, fill: 'var(--ground)' }, hz);
+  el('line', { x1: -200, x2: 200, y1: 0, y2: 0, stroke: '#fff', 'stroke-width': 1.5 }, hz);
+  for (let d = -30; d <= 30; d += 10) { if (!d) continue; const y = -d * PX_PER_DEG, w = d % 20 ? 10 : 18;
+    el('line', { x1: -w, x2: w, y1: y, y2: y, stroke: '#fff', 'stroke-width': 1, opacity: .85 }, hz);
+    const t = el('text', { x: w + 4, y: y + 3.5, fill: '#fff', 'font-size': 8, 'font-family': 'ui-monospace,monospace' }, hz); t.textContent = Math.abs(d); }
+  el('circle', { r: 58, fill: 'none', stroke: '#31404f', 'stroke-width': 3 }, adi);
+  el('path', { d: 'M-34 0 H-12 L-6 6 M34 0 H12 L6 6 M-6 6 L0 0 L6 6', fill: 'none', stroke: '#f2b84b', 'stroke-width': 3, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }, adi);
+  el('circle', { r: 2, fill: '#f2b84b' }, adi);
+
+  const cmp = $('compass');
+  el('circle', { r: 58, fill: '#10161d', stroke: '#31404f', 'stroke-width': 3 }, cmp);
+  const card = el('g', { id: 'card' }, cmp);
+  for (let a = 0; a < 360; a += 10) { const r1 = a % 30 ? 50 : 46, s = Math.sin(a * D2R), c = Math.cos(a * D2R);
+    el('line', { x1: s * r1, y1: -c * r1, x2: s * 55, y2: -c * 55, stroke: '#7a8794', 'stroke-width': a % 30 ? 1 : 1.6 }, card); }
+  [['N', 0], ['E', 90], ['S', 180], ['W', 270]].forEach(([t, a]) => { const s = Math.sin(a * D2R), c = Math.cos(a * D2R);
+    const x = el('text', { x: s * 36, y: -c * 36 + 4.5, 'text-anchor': 'middle', fill: t === 'N' ? '#ff8a83' : '#e9eef3', 'font-size': 13, 'font-weight': 700 }, card); x.textContent = t; });
+  el('path', { d: 'M0 -62 L-5 -52 L5 -52 Z', fill: '#f2b84b' }, cmp);
+  const ht = el('text', { id: 'hdgTxt', x: 0, y: 6, 'text-anchor': 'middle', fill: '#e9eef3', 'font-size': 17, 'font-weight': 700, 'font-family': 'ui-monospace,monospace' }, cmp); ht.textContent = '---°';
+}
+
+// =====================================================================
+//  Altitude chart (canvas, single series, hover crosshair + tooltip)
+// =====================================================================
+let chartHover = null;
+function drawAltChart() {
+  const c = $('altChart'), dpr = devicePixelRatio || 1, W = c.clientWidth, H = c.clientHeight;
+  if (!W || !H) return;
+  if (c.width !== W * dpr || c.height !== H * dpr) { c.width = W * dpr; c.height = H * dpr; }
+  const g = c.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, W, H);
+  const L = 40, R = 14, T = 8, B = 22, pw = W - L - R, ph = H - T - B;
+  const data = S.alt, plan = S.plan && S.plan.pts.length > 1 ? S.plan.pts : null;
+  const tMax = Math.max(110 * 60, data.length ? data[data.length - 1][0] * 1.05 : 0, plan ? plan[plan.length - 1].t * 1.02 : 0), aMax = 22;
+  const X = t => L + (t / tMax) * pw, Y = km => T + ph - (km / aMax) * ph;
+  g.font = '11px ui-monospace,SF Mono,Consolas,monospace'; g.fillStyle = '#7a8794'; g.strokeStyle = '#212b36'; g.lineWidth = 1;
+  g.textAlign = 'right'; g.textBaseline = 'middle';
+  for (let km = 0; km <= 20; km += 5) { const y = Math.round(Y(km)) + .5; g.beginPath(); g.moveTo(L, y); g.lineTo(L + pw, y); g.stroke(); g.fillText(km + ' km', L - 6, y); }
+  g.textAlign = 'center'; g.textBaseline = 'top';
+  let step = tMax > 150 * 60 ? 30 * 60 : 15 * 60;
+  while (pw / (tMax / step) < 60) step *= 2;   // keep labels >= 60 px apart
+  for (let t = 0; t <= tMax; t += step) g.fillText(`${Math.round(t / 60)} min`, X(t), T + ph + 6);
+  // jet-stream band and the planned altitude profile
+  g.fillStyle = 'rgba(201,133,0,.10)'; g.fillRect(L, Y(BAL.jetBand[1] / 1000), pw, Y(BAL.jetBand[0] / 1000) - Y(BAL.jetBand[1] / 1000));
+  if (plan) { g.strokeStyle = 'rgba(170,181,193,.75)'; g.lineWidth = 1.5; g.setLineDash([5, 4]); g.beginPath(); plan.forEach((q, i) => { const x = X(q.t), y = Y(q.z / 1000); i ? g.lineTo(x, y) : g.moveTo(x, y); }); g.stroke(); g.setLineDash([]); g.lineWidth = 1; }
+  // 20 km line
+  g.strokeStyle = '#6b7785'; g.setLineDash([4, 5]); g.beginPath(); const yb = Math.round(Y(CFG.BURST_ALT_M / 1000)) + .5; g.moveTo(L, yb); g.lineTo(L + pw, yb); g.stroke(); g.setLineDash([]);
+  // planned recon pictures
+  if (S.plan && S.plan.stops) allStops().forEach(s => {
+    const sh = S.plan.stops[s.key] && S.plan.stops[s.key].shot; if (!sh) return;
+    const x = X(sh.t), y = Y(sh.alt / 1000), run = S.stopRun[s.key];
+    g.fillStyle = run && run.state === 'done' ? '#199e70' : s.target ? '#e66767' : '#e9eef3'; g.fillRect(x - 7, y - 7, 14, 14);
+    g.fillStyle = run && run.state === 'done' || s.target ? '#fff' : '#0c1016'; g.font = '700 10px ui-monospace,monospace'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText(s.no, x, y + 1);
+  });
+  g.font = '11px ui-monospace,SF Mono,Consolas,monospace'; g.textAlign = 'center';
+  if (!data.length) { g.fillStyle = '#7a8794'; g.textBaseline = 'middle'; g.fillText(plan ? 'Dashed: planned altitude · squares: recon pictures · waiting for launch…' : 'Waiting for launch…', L + pw / 2, T + ph / 2 + 30); return; }
+  g.strokeStyle = '#3987e5'; g.lineWidth = 2; g.lineJoin = 'round'; g.lineCap = 'round'; g.beginPath();
+  data.forEach(([t, a], i) => { const x = X(t), y = Y(a / 1000); i ? g.lineTo(x, y) : g.moveTo(x, y); }); g.stroke();
+  const [lt, la] = data[data.length - 1];
+  g.fillStyle = '#3987e5'; g.strokeStyle = '#141a22'; g.lineWidth = 2; g.beginPath(); g.arc(X(lt), Y(la / 1000), 5, 0, 7); g.fill(); g.stroke();
+  if (chartHover != null) {
+    let best = data[0]; for (const d of data) if (Math.abs(X(d[0]) - chartHover) < Math.abs(X(best[0]) - chartHover)) best = d;
+    const x = X(best[0]), y = Y(best[1] / 1000);
+    g.strokeStyle = '#7a8794'; g.lineWidth = 1; g.beginPath(); g.moveTo(Math.round(x) + .5, T); g.lineTo(Math.round(x) + .5, T + ph); g.stroke();
+    g.fillStyle = '#e9eef3'; g.strokeStyle = '#141a22'; g.lineWidth = 2; g.beginPath(); g.arc(x, y, 5, 0, 7); g.fill(); g.stroke();
+    const tip = $('altTip'); tip.hidden = false; tip.style.left = Math.min(Math.max(x, 70), W - 70) + 'px'; tip.style.top = y + 'px';
+    tip.textContent = `${fmtMET(best[0])} · ${nf0.format(best[1])} m`;
+  } else $('altTip').hidden = true;
+}
+$('altChart').addEventListener('mousemove', e => { chartHover = e.offsetX; drawAltChart(); });
+$('altChart').addEventListener('mouseleave', () => { chartHover = null; drawAltChart(); });
+
+// =====================================================================
+//  Telemetry ingest
+// =====================================================================
+function resetFlightView(reason) {
+  S.track = []; S.alt = []; S.dets = []; S.detSig = ''; S.pred = null; S.stopRun = {}; setTimeout(drawStops, 0);
+  if (map) { M.track.setLatLngs([]); M.pred.setLatLngs([]); M.dets.clearLayers(); M.land.remove(); M.burst.remove(); }
+  renderDetList();
+  if (reason) log(reason);
+}
+
+function ingest(p, rssi) {
+  const now = performance.now();
+  // duplicates (same packet direct + via relay)
+  if (S.seen.has(p.seq)) { S.seen.get(p.seq).add(p.hops); S.dirty = true; return; }
+  S.seen.set(p.seq, new Set([p.hops]));
+  if (S.seen.size > 400) S.seen.delete(S.seen.keys().next().value);
+  S.uniq.push([now, p.seq]); S.rxTimes.push(now); S.rssi = rssi;
+
+  const prev = S.last;
+  if (prev && p.uptime + 2000 < prev.uptime) { log('Payload restarted', 'warn'); S.uniq = [[now, p.seq]]; }
+  else if (prev && ((p.seq - prev.seq) & 0xFFFF) > 1000) S.uniq = [[now, p.seq]];  // big jump: new source
+  if (prev && p.met + 5 < prev.met) resetFlightView('New flight - track cleared');
+  // phase changes
+  if (!prev || prev.phase !== p.phase) {
+    const pos = `${p.lat.toFixed(4)}, ${p.lon.toFixed(4)}`;
+    if (prev) {
+      if (p.phase === 1) { resetFlightView(); log('LAUNCH - balloon released', 'good'); if (map) map.setView([p.lat, p.lon], 9); }
+      if (p.phase === 2) log(prev.phase >= 4 ? `CUT-DOWN at ${nf0.format(prev.alt)} m - payload descending under parachute` : `BURST / cut-down at ${nf0.format(prev.alt)} m - descending under parachute`, 'warn');
+      if (p.phase === 4) log(`Jet stream reached - venting helium to ride at ${S.source === 'demo' && demo.f && demo.f.zSet ? (demo.f.zSet / 1000).toFixed(1) : '≈11'} km toward the target`, 'good');
+      if (p.phase === 5) log('Ballast dropped - climbing to 20 km over the target area');
+      if (p.phase === 6) log(`Over the target area at 20 km - loitering ${BAL.loiterMin} min for reconnaissance`, 'good');
+      if (p.phase === 1 || p.phase === 0) setTimeout(drawPlan, 0);
+      if (p.phase === 3) log(`LANDED at ${pos} - ${fmtDistTxt(distBearing(S.launch, [p.lat, p.lon]).d)} from launch`, 'good');
+      if (p.phase === 0) { resetFlightView(); log('Payload on the pad'); }
+    } else log(`First packet - payload is ${PHASES[p.phase].toLowerCase()}`, 'good');
+  }
+  // flags
+  const rose = f => (p.flags & f) && !(prev && (prev.flags & f));
+  if (rose(FLAG.FREEFALL)) log('Free-fall detected by accelerometer', 'warn');
+  if (rose(FLAG.SHOCK)) log(`Shock detected (${p.accel.toFixed(1)} g)`, 'warn');
+  if (rose(FLAG.MAG_CAL)) log('Compass calibration running - rotate the payload in a figure-8 (15 s)');
+  if (prev && (prev.flags & FLAG.MAG_CAL) && !(p.flags & FLAG.MAG_CAL)) log('Compass calibration finished', 'good');
+  if (!prev && p.heading == null) log('No heading: the compass comes from the GY-91, and it is not connected', 'warn');
+  else if (!prev && !(p.flags & FLAG.MAG_OK)) log('This GY-91 has no working compass - heading from its gyro only, not north', 'warn');
+  if (!prev && !(p.flags & FLAG.BARO_OK)) log('Barometer not found on payload', 'bad');
+
+  // positions
+  if (p.phase === 0) {
+    if (Math.abs(p.lat - S.launch[0]) > 1e-6 || Math.abs(p.lon - S.launch[1]) > 1e-6) { S.launch = [p.lat, p.lon]; moveLaunchGraphics(); }
+    S.groundAlt = p.alt;
+  } else if (FLYING(p.phase) || (p.phase === 3 && (!prev || prev.phase !== 3))) {
+    const lp = S.track[S.track.length - 1];
+    if (!lp || distBearing(lp, [p.lat, p.lon]).d > 15) S.track.push([p.lat, p.lon]);
+    const la = S.alt[S.alt.length - 1];
+    if (!la || p.met > la[0]) S.alt.push([p.met, p.alt]);
+  }
+  S.pred = S.source === 'demo' ? demo.pred : predictLanding(p.lat, p.lon, p.alt, p.phase, S.groundAlt);
+  if (p.phase !== 0) gimbalTick(p);
+
+  // detections
+  if (p.detAge !== 255 && p.detConf > 0) {
+    const sig = `${p.detLabel}|${p.detConf}|${p.detLat}|${p.detLon}`;
+    const lastDet = S.dets[0];
+    if (sig !== S.detSig || (lastDet && p.detAge + 5 < lastDet.lastAge)) {
+      S.detSig = sig;
+      const d = { label: LABELS[p.detLabel] || 'object', conf: p.detConf, met: Math.max(0, p.met - p.detAge / 10 * (p.flags & FLAG.GPS_SIM ? (S.source === 'demo' ? demo.speed : CFG.DEMO_SIM_SPEED) : 1)),
+        pos: (p.detLat || p.detLon) ? [p.detLat, p.detLon] : null, alt: p.alt, time: clock(), lastAge: p.detAge };
+      S.dets.unshift(d); if (S.dets.length > 60) { const old = S.dets.pop(); old.marker && old.marker.remove(); }
+      addDetMarker(d); renderDetList();
+      log(`Detection: ${d.label} ${d.conf}%${d.pos ? ' - geolocated' : ''}`);
+    } else if (lastDet) lastDet.lastAge = p.detAge;
+  }
+  // command ack
+  if (S.pending && p.ack === S.pending.seq) {
+    $('cmdStatus').innerHTML = `<b>${CMD_NAME[S.pending.cmd]}</b> acknowledged by payload in ${Math.round(now - S.pending.t)} ms`;
+    log(`${CMD_NAME[S.pending.cmd]} acknowledged`, 'good');
+    S.pending = null;
+  }
+  if (S.firstFix && map) { map.setView([p.lat, p.lon], 9); S.firstFix = false; }
+  S.last = p; S.lastRx = now; S.dirty = true;
+}
+
+// =====================================================================
+//  Rendering
+// =====================================================================
+function setText(id, html) { const e = $(id); if (e.innerHTML !== html) e.innerHTML = html; }
+function render() {
+  const p = S.last;
+  if (p) {
+    setText('vAlt', nf0.format(p.alt));
+    setText('vAgl', fmtDistTxt(Math.max(0, p.alt - S.groundAlt)));
+    const arrow = p.vz > 0.3 ? '▲' : p.vz < -0.3 ? '▼' : '';
+    setText('vVz', `${arrow} ${Math.abs(p.vz).toFixed(1)}<span class="u">m/s</span>`);
+    const db = distBearing(S.launch, [p.lat, p.lon]);
+    setText('vDist', db.d < 50 ? `0<span class="u">m</span>` : `${fmtDist(db.d)} <span class="u">${Math.round(db.brg)}° ${point(db.brg)}</span>`);
+    setText('vPos', `${p.lat.toFixed(5)}°N<br>${p.lon.toFixed(5)}°E`);
+    if (S.pred) { const lb = distBearing(S.launch, S.pred.end); setText('vLand', `${fmtDistTxt(lb.d)} ${point(lb.brg)}<br><span class="u">${S.pred.end[0].toFixed(3)}, ${S.pred.end[1].toFixed(3)}</span>`); }
+    else setText('vLand', p.phase === 3 ? 'landed' : '—');
+    const sim = p.flags & FLAG.GPS_SIM;
+    const b = $('srcBadge'); b.textContent = sim ? 'SIMULATED GPS' : 'REAL GPS'; b.className = 'badge ' + (sim ? 'sim' : 'real');
+    setText('pillPhase', PHASES[p.phase] || '?');
+    setText('met', fmtMET(p.met));
+
+    $('hz').setAttribute('transform', `rotate(${-p.roll}) translate(0 ${p.pitch * PX_PER_DEG})`);
+    const hOk = p.heading != null;
+    $('card').setAttribute('transform', `rotate(${hOk ? -p.heading : 0})`); $('card').style.opacity = hOk ? 1 : .3;
+    $('hdgTxt').textContent = hOk ? `${String(Math.round(p.heading) % 360).padStart(3, '0')}°` : '---';
+    setText('vRoll', `${p.roll.toFixed(1)}<span class="u">°</span>`);
+    setText('vPitch', `${p.pitch.toFixed(1)}<span class="u">°</span>`);
+    setText('vHdg', hOk ? `${Math.round(p.heading) % 360}<span class="u">°</span>` : '—');
+    setText('vG', p.accel > 0 ? `${p.accel.toFixed(2)}<span class="u">g</span>` : '—');
+    setText('magNote', p.flags & FLAG.MAG_CAL ? 'calibrating compass…' : !hOk ? 'no heading · connect the GY-91' : (p.flags & FLAG.MAG_OK ? 'compass: GY-91' : 'GY-91 has no compass · gyro heading, not north'));
+
+    if (p.flags & FLAG.BARO_OK) {
+      setText('vP', `${(p.press / 100).toFixed(2)}<span class="u">hPa</span>`);
+      setText('vT', `${p.temp.toFixed(1)}<span class="u">°C</span>`);
+      setText('vBaro', `${p.baroAlt >= 0 ? '+' : ''}${p.baroAlt.toFixed(2)}<span class="u">m</span>`);
+    }
+
+    if (map) {
+      const pos = [p.lat, p.lon];
+      M.balloon.setLatLng(pos);
+      const elx = M.balloon.getElement();
+      if (elx) { const sv = elx.querySelector('svg'); sv.style.transform = `rotate(${p.heading ?? 0}deg)`; sv.style.opacity = p.heading == null ? .25 : 1; elx.querySelector('.lbl').textContent = `${(p.alt / 1000).toFixed(2)} km`; }
+      M.track.setLatLngs(S.track.length ? [...S.track, pos] : []);
+      if (S.pred) {
+        M.pred.setLatLngs(S.pred.pts); M.land.setLatLng(S.pred.end).addTo(map);
+        if (S.pred.burst) { M.burst.setLatLng(S.pred.burst).addTo(map); M.burst.setTooltipContent(S.pred.burstLabel || 'Predicted burst'); } else M.burst.remove();
+      } else { M.pred.setLatLngs([]); M.land.remove(); M.burst.remove(); }
+      if ($('chkFollow').checked && !S.picking && !map.getBounds().pad(-0.2).contains(pos)) map.panTo(pos);
+    }
+  }
+  renderLink();
+  renderHealth();
+  updateWindFollow();
+  renderMission();
+  renderStops();
+  if (S.tab === 'alt') drawAltChart(); else if (S.tab === 'wind') drawWindProfile(); else if (S.tab === 'cam') drawCam(); else if (S.tab === 'health') drawResid();
+  drawFallback();
+}
+
+function renderLink() {
+  const now = performance.now();
+  S.rxTimes = S.rxTimes.filter(t => now - t < 3000);
+  S.uniq = S.uniq.filter(([t]) => now - t < 10000);
+  const age = S.lastRx ? now - S.lastRx : Infinity;
+  const pill = $('pillLink');
+  if (!S.source) { pill.className = 'pill bad'; setText('linkText', 'NOT CONNECTED'); }
+  else if (age < 1500) { pill.className = 'pill good'; setText('linkText', S.source === 'demo' ? 'LINK OK · DEMO' : 'LINK OK'); }
+  else if (age < 5000) { pill.className = 'pill warn'; setText('linkText', 'LINK WEAK'); }
+  else { pill.className = 'pill bad'; setText('linkText', S.lastRx ? 'LINK LOST' : 'NO PACKETS'); }
+
+  setText('vRate', S.rxTimes.length ? (S.rxTimes.length / 3).toFixed(1) : '0');
+  if (S.uniq.length > 3) {
+    const first = S.uniq[0][1], last = S.uniq[S.uniq.length - 1][1], exp = ((last - first) & 0xFFFF) + 1;
+    setText('vLoss', `${Math.max(0, 100 * (1 - S.uniq.length / exp)).toFixed(0)}<span class="u">%</span>`);
+  } else setText('vLoss', '—');
+  setText('vRssi', S.rssi != null && age < 5000 ? `${S.rssi}<span class="u">dBm</span>` : '—');
+
+  // path
+  const hops = S.last ? S.seen.get(S.last.seq) : null, fresh = age < 3000;
+  const direct = fresh && hops && hops.has(0), relay = fresh && hops && hops.has(1);
+  $('nPay').classList.toggle('on', fresh); $('nGnd').classList.toggle('on', fresh);
+  $('nRel').classList.toggle('on', !!relay); $('nRel').classList.toggle('dim', !!direct && !relay); $('h1').classList.toggle('on', !!relay || !!direct); $('h2').classList.toggle('on', !!relay || !!direct);
+  setText('pathNote', !fresh ? 'No packets in the last 3 s.' : relay && direct ? 'Receiving both direct and via relay (mesh redundancy).'
+    : relay ? 'Packets arriving via the relay node (2 hops).' : 'Direct link payload → ground (1 hop).');
+}
+
+function renderDetList() {
+  const ul = $('detList');
+  setText('detCount', String(S.dets.length));
+  if (!S.dets.length) { ul.innerHTML = '<li class="empty">No detections yet. Camera results appear here and on the map.</li>'; return; }
+  ul.innerHTML = '';
+  S.dets.forEach(d => {
+    const li = document.createElement('li'); li.className = 'det';
+    const where = d.pos ? `${d.pos[0].toFixed(5)}, ${d.pos[1].toFixed(5)} · ${fmtDistTxt(distBearing(S.launch, d.pos).d)} from launch` : 'not geolocated (on ground / above horizon)';
+    li.innerHTML = `<i class="ic"></i><span class="t1"></span><span class="cf"></span><span class="t2"></span>`;
+    li.querySelector('.t1').textContent = d.label.toUpperCase();
+    li.querySelector('.cf').textContent = `${d.conf}%  ${fmtMET(d.met)}`;
+    li.querySelector('.t2').textContent = `${where} · seen from ${(d.alt / 1000).toFixed(1)} km`;
+    li.onclick = () => { if (map && d.pos) { $('chkFollow').checked = false; map.setView(d.pos, 13); d.marker && d.marker.openTooltip(); } };
+    ul.appendChild(li);
+  });
+}
+
+function frame() { if (S.dirty) { S.dirty = false; render(); } requestAnimationFrame(frame); }
+setInterval(() => { S.dirty = true; checkPending(); }, 500);
+addEventListener('resize', () => { S.dirty = true; });
+
+// =====================================================================
+//  Sensor health: GY-91 (a) vs flight controller F405 (b)
+// =====================================================================
+const fmtV = (k, x) => { const m = HCH[k]; let v = x / m.vd; if (m.hdg) v = (v + 360) % 360; return v.toFixed(m.vf); };
+const fmtE = (k, x, sign) => { const m = HCH[k], v = x / m.ed; return (sign && v > 0 ? '+' : '') + v.toFixed(m.ef); };
+function thresholds(k, c) {
+  const m = HCH[k], s0 = Math.hypot(c.sa, c.sb) / m.ed;     // residual noise at rest ~ both sensors combined
+  return { warn: Math.max(3 * s0, m.warn), fault: Math.max(6 * s0, m.fault) };
+}
+function ingestHealth(h) {
+  if (S.health && h.seq === S.health.seq) return;            // same packet via the relay
+  const prev = S.health, now = performance.now();
+  if (prev && h.uptime + 2000 < prev.uptime) S.hist = HCH.map(() => []);
+  if (!prev || !!(prev.flags & HFLAG.FC) !== !!(h.flags & HFLAG.FC))
+    log(h.flags & HFLAG.FC ? 'F405 flight controller connected (MAVLink)' : 'F405 flight controller not connected - GY-91 only', h.flags & HFLAG.FC ? 'good' : 'warn');
+  if (prev && (prev.flags & HFLAG.GY) && !(h.flags & HFLAG.GY)) log('GY-91 lost - estimates now come from the F405 alone', 'bad');
+  if (prev && !(prev.flags & HFLAG.GY) && (h.flags & HFLAG.GY)) log('GY-91 back - comparing both chains again', 'good');
+  if ((h.flags & HFLAG.CALIB) && !(prev && prev.flags & HFLAG.CALIB)) log('Sensor calibration running - keep the payload still for 20 s');
+  if (prev && (prev.flags & HFLAG.CALIB) && !(h.flags & HFLAG.CALIB)) { log('Sensor calibration done: bias and noise measured', 'good'); S.hist = HCH.map(() => []); }
+  h.ch.forEach((c, k) => {
+    const was = prev ? prev.ch[k].st : 0;
+    if (c.st >= 3 && c.st !== was) log(`${HCH[k].name}: GY-91 and F405 disagree by ${fmtE(k, c.resid, true)} ${HCH[k].eu} (${HSTAT[c.st]})`, c.st === 4 ? 'bad' : 'warn');
+    if (was >= 3 && c.st === 2) log(`${HCH[k].name}: sensors agree again`, 'good');
+    if (c.st >= 1) { const hs = S.hist[k]; hs.push([now / 1000, c.resid / HCH[k].ed]); if (hs.length > 180) hs.shift(); }
+  });
+  S.health = h; S.hRx = now; S.dirty = true;
+}
+function renderHealth() {
+  const h = S.health, fresh = h && performance.now() - S.hRx < 5000;
+  const badge = $('fcBadge'), sum = $('hSummary');
+  if (!fresh) {
+    badge.textContent = 'F405 —'; badge.className = 'badge';
+    setText('hSummary', 'No sensor data'); sum.className = 'big'; setText('hCounts', '');
+    ['vGps', 'vBatt', 'vMav'].forEach(id => setText(id, '—'));
+    $('calBar').style.width = '0%';
+    if (!$('hBody').children.length || $('hBody').dataset.state !== 'empty') {
+      $('hBody').innerHTML = HCH.map((m, k) => `<tr data-k="${k}" class="${k === S.sel ? 'sel' : ''}"><td>${m.name}</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td><td><span class="chip">no data</span></td></tr>`).join('');
+      $('hBody').dataset.state = 'empty';
+    }
+    setText('tch', 'Waiting for sensor-health packets from the payload.');
+    return;
+  }
+  const fcOk = h.flags & HFLAG.FC;
+  const inav = fcOk && (h.flags & HFLAG.INAV);
+  badge.textContent = fcOk ? (inav ? 'F405 LINKED · INAV' : 'F405 LINKED') : 'F405 —'; badge.className = 'badge ' + (fcOk ? 'real' : '');
+  const n = [0, 0, 0, 0, 0]; h.ch.forEach(c => n[c.st]++);
+  let txt, cls;
+  if (!fcOk) { txt = 'GY-91 only'; cls = 'warn'; }
+  else if (!(h.flags & HFLAG.GY)) { txt = 'F405 only · GY-91 lost'; cls = 'fault'; }
+  else if (h.flags & HFLAG.CALIB) { txt = `Calibrating… ${h.cal}%`; cls = ''; }
+  else if (n[4]) { txt = `${n[4]} fault${n[4] > 1 ? 's' : ''}`; cls = 'fault'; }
+  else if (n[3]) { txt = `${n[3]} warning${n[3] > 1 ? 's' : ''}`; cls = 'warn'; }
+  else if (n[1] && !n[2]) { txt = 'Not calibrated'; cls = 'warn'; }
+  else { txt = `${n[2]} of ${11 - n[0]} agree`; cls = 'ok'; }
+  setText('hSummary', txt); sum.className = 'big ' + cls;
+  setText('hCounts', fcOk ? `OK ${n[2]} · warn ${n[3]} · fault ${n[4]}` : 'connect the F405 to compare');
+  setText('vGps', fcOk ? (h.fix >= 3 ? `3D · ${h.sats} sats` : h.fix === 2 ? `2D · ${h.sats} sats` : `no fix · ${h.sats}`) : '—');
+  setText('vBatt', !fcOk ? '—' : h.battMv > 3000 ? `${(h.battMv / 1000).toFixed(2)}<span class="u">V</span>` : 'USB power');
+  setText('vMav', fcOk ? `${h.rate}<span class="u">msg/s</span>` : '—');
+  $('calBar').style.width = `${h.flags & HFLAG.CALIB ? h.cal : (h.flags & HFLAG.CAL ? 100 : 0)}%`;
+  setText('calStatus', h.flags & HFLAG.CALIB ? 'Keep the payload still - measuring bias and noise of every sensor…'
+    : h.flags & HFLAG.CAL ? 'Calibrated. Δ = F405 − GY-91 − bias; WARN above 3σ, FAULT above 6σ for 1 s.'
+    : 'Measures each sensor\'s bias and noise, then watches the error between them.');
+  // table
+  const rows = h.ch.map((c, k) => {
+    const m = HCH[k], nd = c.st === 0, cal = c.st >= 2;
+    const noMag = k === 4 && fcOk && !(h.flags & HFLAG.FCMAG) && c.st === 0;
+    const noAcc = k >= 8 && inav && c.st === 0;
+    const chip = `<span class="chip ${c.st === 2 ? 'ok' : c.st === 3 ? 'warn' : c.st === 4 ? 'fault' : ''}">${noMag ? 'F405 has no compass' : noAcc ? 'INAV sends no accel' : HSTAT[c.st]}</span>`;
+    const cell = (x, f) => nd ? '—' : f(x);
+    const sub = inav && k === 0 ? '<span class="rowsub">F405 = INAV altitude → hPa</span>' : '';
+    return `<tr data-k="${k}" class="${k === S.sel ? 'sel' : ''}"><td>${m.name}${sub}</td>` +
+      `<td>${cell(c.a, x => fmtV(k, x) + ' ' + m.vu)}</td><td>${cell(c.b, x => fmtV(k, x) + ' ' + m.vu)}</td>` +
+      `<td>${cell(c.resid, x => fmtE(k, x, true) + ' ' + m.eu)}</td>` +
+      `<td>${cal ? fmtE(k, c.bias, true) : '—'}</td><td>${nd ? '—' : fmtE(k, c.sl)}</td>` +
+      `<td>${cal ? fmtE(k, c.sa) : '—'}</td><td>${cal ? fmtE(k, c.sb) : '—'}</td><td>${chip}</td></tr>`;
+  }).join('');
+  if ($('hBody').dataset.html !== rows) { $('hBody').innerHTML = rows; $('hBody').dataset.html = rows; $('hBody').dataset.state = 'data'; }
+  // three-cornered hat
+  if (h.flags & HFLAG.TCH) setText('tch', `<b>Altitude error split</b> (three-cornered hat, needs GPS): BMP280 <b>±${(h.tch[0] / 100).toFixed(2)} m</b> · DPS310 <b>±${(h.tch[1] / 100).toFixed(2)} m</b> · GPS <b>±${(h.tch[2] / 100).toFixed(2)} m</b>`);
+  else if (h.flags & HFLAG.GPS3D) setText('tch', '<b>Altitude error split:</b> collecting… needs about a minute with a GPS 3D fix.');
+  else setText('tch', '<b>Altitude error split:</b> needs a GPS 3D fix (outdoors) to separate BMP280, DPS310 and GPS noise.');
+}
+let residHover = null;
+function drawResid() {
+  const c = $('residChart'), dpr = devicePixelRatio || 1, W = c.clientWidth, H = c.clientHeight;
+  if (!W || !H) return;
+  if (c.width !== W * dpr || c.height !== H * dpr) { c.width = W * dpr; c.height = H * dpr; }
+  const g = c.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, W, H);
+  const k = S.sel, m = HCH[k], data = S.hist[k], h = S.health;
+  setText('residTitle', `<b>${m.name}</b> · Δ = F405 − GY-91 − bias, last 2 min (${m.eu})`);
+  const L = 48, R = 10, T = 8, B = 20, pw = W - L - R, ph = H - T - B;
+  const now = performance.now() / 1000, span = 120;
+  const thr = h && h.ch[k].st >= 2 ? thresholds(k, h.ch[k]) : null;
+  let ymax = thr ? thr.fault * 1.25 : m.warn;
+  data.forEach(([, r]) => { ymax = Math.max(ymax, Math.abs(r) * 1.15); });
+  const X = t => L + (1 - (now - t) / span) * pw, Y = r => T + ph / 2 - (r / ymax) * (ph / 2);
+  g.font = '11px ui-monospace,SF Mono,Consolas,monospace'; g.textAlign = 'right'; g.textBaseline = 'middle';
+  if (thr) {   // normal band (±3σ) and fault lines (±6σ)
+    g.fillStyle = 'rgba(57,135,229,.10)'; g.fillRect(L, Y(thr.warn), pw, Y(-thr.warn) - Y(thr.warn));
+    g.strokeStyle = '#e5534b'; g.setLineDash([4, 4]); g.lineWidth = 1;
+    [thr.fault, -thr.fault].forEach(v => { const y = Math.round(Y(v)) + .5; g.beginPath(); g.moveTo(L, y); g.lineTo(L + pw, y); g.stroke(); });
+    g.setLineDash([]);
+    g.fillStyle = '#7a8794';
+    g.fillText(`+${thr.warn.toFixed(m.ef)}`, L - 6, Y(thr.warn)); g.fillText(`−${thr.warn.toFixed(m.ef)}`, L - 6, Y(-thr.warn));
+    g.textAlign = 'left'; g.fillStyle = '#ff8a83'; g.fillText('fault', L + 4, Y(thr.fault) - 8); g.textAlign = 'right';
+  }
+  g.strokeStyle = '#31404f'; g.beginPath(); g.moveTo(L, Math.round(Y(0)) + .5); g.lineTo(L + pw, Math.round(Y(0)) + .5); g.stroke();
+  g.fillStyle = '#7a8794'; g.fillText('0', L - 6, Y(0));
+  g.textAlign = 'center'; g.textBaseline = 'top';
+  [-120, -90, -60, -30, 0].forEach(s => g.fillText(s ? `${s} s` : 'now', L + (1 + s / span) * pw, T + ph + 5));
+  const pts = data.filter(([t]) => now - t <= span);
+  if (!pts.length) {
+    g.textBaseline = 'middle'; g.fillText(thr ? 'Waiting for data…' : 'Calibrate the sensors to see the error band', L + pw / 2, T + ph / 2);
+    $('residTip').hidden = true; return;
+  }
+  g.strokeStyle = '#3987e5'; g.lineWidth = 2; g.lineJoin = 'round'; g.lineCap = 'round'; g.beginPath();
+  pts.forEach(([t, r], i) => { const x = X(t), y = Y(r); i ? g.lineTo(x, y) : g.moveTo(x, y); }); g.stroke();
+  const [lt, lr] = pts[pts.length - 1];
+  g.fillStyle = '#3987e5'; g.strokeStyle = '#141a22'; g.lineWidth = 2; g.beginPath(); g.arc(X(lt), Y(lr), 4.5, 0, 7); g.fill(); g.stroke();
+  const tip = $('residTip');
+  if (residHover != null) {
+    let best = pts[0]; for (const p of pts) if (Math.abs(X(p[0]) - residHover) < Math.abs(X(best[0]) - residHover)) best = p;
+    const x = X(best[0]), y = Y(best[1]);
+    g.strokeStyle = '#7a8794'; g.lineWidth = 1; g.beginPath(); g.moveTo(Math.round(x) + .5, T); g.lineTo(Math.round(x) + .5, T + ph); g.stroke();
+    g.fillStyle = '#e9eef3'; g.strokeStyle = '#141a22'; g.lineWidth = 2; g.beginPath(); g.arc(x, y, 4.5, 0, 7); g.fill(); g.stroke();
+    tip.hidden = false; tip.style.left = Math.min(Math.max(x, 70), W - 70) + 'px'; tip.style.top = y + 'px';
+    tip.textContent = `${Math.round(best[0] - now)} s · Δ ${best[1] >= 0 ? '+' : ''}${best[1].toFixed(m.ef)} ${m.eu}`;
+  } else tip.hidden = true;
+}
+$('residChart').addEventListener('mousemove', e => { residHover = e.offsetX; drawResid(); });
+$('residChart').addEventListener('mouseleave', () => { residHover = null; drawResid(); });
+$('hBody').addEventListener('click', e => { const tr = e.target.closest('tr'); if (!tr) return; S.sel = +tr.dataset.k; $('hBody').dataset.html = ''; S.dirty = true; });
+function setTab(t) {
+  S.tab = t;
+  [['alt', 'tabAlt', 'paneAlt'], ['wind', 'tabWind', 'paneWind'], ['cam', 'tabCam', 'paneCam'], ['rep', 'tabRep', 'paneRep'], ['health', 'tabHealth', 'paneHealth']].forEach(([k, tb, pn]) => {
+    $(tb).classList.toggle('on', t === k); $(tb).setAttribute('aria-selected', t === k); $(pn).hidden = t !== k;
+  });
+  document.querySelector('.left').classList.toggle('tab-health', t === 'health');
+  document.querySelector('.left').classList.toggle('tab-wind', t === 'wind');
+  document.querySelector('.left').classList.toggle('tab-cam', t === 'cam');
+  document.querySelector('.left').classList.toggle('tab-rep', t === 'rep');
+  setText('paneHint', t === 'alt' ? 'grey dashed = mission plan · amber band = jet stream · squares = recon pictures'
+    : t === 'wind' ? 'over the balloon (or launch site) at the wind-panel time · arrows = where it blows'
+    : t === 'cam' ? 'picture made from satellite imagery · scroll to zoom · click an object to see it on the map'
+    : t === 'rep' ? 'one line per picture · click a line to open the picture'
+    : 'GY-91 vs F405 · click a row to plot its error · band = ±3σ, red = fault (6σ)');
+  S.dirty = true;
+}
+$('tabAlt').onclick = () => setTab('alt');
+$('tabWind').onclick = () => setTab('wind');
+$('tabCam').onclick = () => setTab('cam');
+$('tabRep').onclick = () => setTab('rep');
+$('tabHealth').onclick = () => setTab('health');
+$('cCalSensors').onclick = () => sendCommand(CMD.CAL_SENSORS);
+
+// =====================================================================
+//  Mission planning, wind layer and wind profile (uses the physics above)
+// =====================================================================
+const PCOL = { 1: '#199e70', 5: '#199e70', 4: '#c98500', 6: '#d55181', 2: '#9085e9', 3: '#9085e9' };
+const PNAME = { 0: 'On the pad', 1: 'Climb', 2: 'Descent under parachute', 3: 'Landed', 4: 'Jet-stream ride', 5: 'Climb to 20 km', 6: 'Loiter over target' };
+const FLYING = ph => ph === 1 || ph === 2 || ph >= 4;
+const footprintR = () => BAL.reconAlt * Math.tan(CFG.CAM_HFOV * D2R / 2);   // camera half-width on the ground from 20 km
+const fromDeg = (vn, ve) => (Math.atan2(-ve, -vn) / D2R + 360) % 360;        // meteorological: where the wind comes FROM
+const towardDeg = (vn, ve) => (Math.atan2(ve, vn) / D2R + 360) % 360;
+const fmtT = s => `T+${Math.floor(s / 3600)}:${pad(Math.floor(s / 60) % 60)}`;
+const fmtDur = s => { const m = Math.round(s / 60); return m < 60 ? `${m} min` : `${Math.floor(m / 60)} h ${pad(m % 60)} min`; };
+function mulberry32(a) { return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+const gauss = r => Math.sqrt(-2 * Math.log(r() || 1e-9)) * Math.cos(2 * Math.PI * r());
+
+// wind for a flight whose (n, e) are measured from 'origin' (the matrix may be centred elsewhere)
+function windFn(origin) {
+  return (n, e, z, t, out) => {
+    const o = WIND.origin;
+    return WIND.sample(n + (origin[0] - o[0]) * D2R * R_E, e + (origin[1] - o[1]) * D2R * R_E * Math.cos(o[0] * D2R), z, t, out);
+  };
+}
+function windAtLL(lat, lon, z, t) { const [n, e] = llToNE(WIND.origin, lat, lon); return WIND.sample(n, e, z, t); }
+function ensureWind() {
+  if (!WIND.data || distBearing(WIND.origin, S.launch).d > 30000) {
+    WIND.build(S.launch, CFG.DEFAULT_LAUNCH, S.groundAlt);
+    log(`Wind matrix built: ${WIND.NX}×${WIND.NY} points × ${WIND.NZ} altitudes × ${WIND.NT} hours (${Math.round(WIND.buildMs)} ms)`);
+  }
+}
+function inPoly(pt, poly) {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const [yi, xi] = poly[i], [yj, xj] = poly[j];
+    if ((xi > pt[1]) !== (xj > pt[1]) && pt[0] < (yj - yi) * (pt[1] - xi) / (xj - xi) + yi) inside = !inside;
+  }
+  return inside;
+}
+
+// ---------------------------------------------------------------------
+//  Plan: the whole mission from the launch site, plus what-ifs
+// ---------------------------------------------------------------------
+let replanTimer = null;
+function scheduleReplan() { clearTimeout(replanTimer); replanTimer = setTimeout(replan, 120); }
+function replan() {
+  ensureWind();
+  const o = S.launch.slice(), wind = windFn(o), toLL = (n, e) => offsetLatLon(o[0], o[1], n, e);
+  const tgt = S.target ? llToNE(o, S.target[0], S.target[1]) : null;
+  const ctx = { wind, groundAlt: S.groundAlt, control: true, target: tgt };
+  const f0 = newFlight(S.groundAlt);
+  const plan = simulate(f0, Object.assign({}, ctx), 2, 30);
+  const free = simulate(f0, Object.assign({}, ctx, { control: false }), 2, 60);
+
+  // landing area: 12 more runs with the wind 10 % stronger/weaker and turned by a few degrees
+  const rng = mulberry32(12345), lands = [];
+  for (let i = 0; i < 12; i++) {
+    const s = 1 + 0.1 * gauss(rng), rot = 8 * D2R * gauss(rng), cr = Math.cos(rot), sr = Math.sin(rot);
+    const w2 = (n, e, z, t, out) => { const u = wind(n, e, z, t, out), a = u[0], b = u[1]; u[0] = s * (a * cr - b * sr); u[1] = s * (a * sr + b * cr); return u; };
+    lands.push(simulate(f0, Object.assign({}, ctx, { wind: w2 }), 4, 1e9).end);
+  }
+  const mn = lands.reduce((a, f) => a + f.n, 0) / lands.length, me = lands.reduce((a, f) => a + f.e, 0) / lands.length;
+  let cnn = 0, cee = 0, cne = 0;
+  lands.forEach(f => { cnn += (f.n - mn) ** 2; cee += (f.e - me) ** 2; cne += (f.n - mn) * (f.e - me); });
+  cnn /= lands.length; cee /= lands.length; cne /= lands.length;
+  const tr = (cnn + cee) / 2, det = Math.sqrt(Math.max(0, ((cnn - cee) / 2) ** 2 + cne * cne));
+  const l1 = Math.max(tr + det, 4e6), l2 = Math.max(tr - det, 4e6), ang = 0.5 * Math.atan2(2 * cne, cnn - cee);
+  const ellipse = [];
+  for (let k = 0; k <= 48; k++) {
+    const th = k / 48 * 2 * Math.PI, a = 2 * Math.sqrt(l1) * Math.cos(th), b = 2 * Math.sqrt(l2) * Math.sin(th);
+    ellipse.push(toLL(mn + a * Math.cos(ang) - b * Math.sin(ang), me + a * Math.sin(ang) + b * Math.cos(ang)));
+  }
+
+  // reachable sector: ride each altitude of the jet band from the point where the balloon gets there
+  const entryEv = plan.events.find(ev => ev.type === 'jet');
+  const entryPt = entryEv || (() => { const q = plan.pts.find(p => p[2] >= BAL.jetBand[0]); return q ? { n: q[0], e: q[1], t: q[3] } : null; })();
+  let sector = null, sectorNE = null;
+  if (entryPt) {
+    const rides = [];
+    for (let z = BAL.jetBand[0]; z <= BAL.jetBand[1]; z += 1000) {
+      let n = entryPt.n, e = entryPt.e, t = entryPt.t;
+      const pts = [[n, e]];
+      for (let k = 0; k < 60 && Math.max(Math.abs(n), Math.abs(e)) < 290000; k++) {
+        for (let j = 0; j < 5; j++) { const u = wind(n, e, z, t); n += u[0] * 60; e += u[1] * 60; t += 60; }
+        pts.push([n, e]);
+      }
+      const last = pts[pts.length - 1];
+      rides.push({ pts, brg: Math.atan2(last[1] - entryPt.e, last[0] - entryPt.n) });
+    }
+    rides.sort((a, b) => a.brg - b.brg);
+    sectorNE = [...rides[0].pts, ...rides.slice(1, -1).map(r => r.pts[r.pts.length - 1]), ...rides[rides.length - 1].pts.slice().reverse()];
+    sector = sectorNE.map(q => toLL(q[0], q[1]));
+  }
+
+  // summary numbers
+  let dMin = Infinity, tOver = null;
+  if (tgt) plan.pts.forEach(q => { const d = Math.hypot(tgt[0] - q[0], tgt[1] - q[1]); if (d < dMin) { dMin = d; tOver = q[3]; } });
+  let dFree = Infinity;
+  if (tgt) free.pts.forEach(q => { dFree = Math.min(dFree, Math.hypot(tgt[0] - q[0], tgt[1] - q[1])); });
+  const ev = type => plan.events.find(x => x.type === type);
+  const rides = [];
+  plan.events.forEach(x => { if (x.type === 'jet') rides.push(x.ride); if (x.type === 'steer') rides.push(x.to); });
+  const jet = ev('jet'), climb = ev('climb');
+  let gs = 0, ng = 0;
+  for (let i = 1; i < plan.pts.length; i++) if (plan.pts[i][4] === PH.JET) {
+    const a = plan.pts[i - 1], b = plan.pts[i]; gs += Math.hypot(b[0] - a[0], b[1] - a[1]) / Math.max(1, b[3] - a[3]); ng++;
+  }
+  S.plan = {
+    origin: o, pts: plan.pts.map(q => ({ ll: toLL(q[0], q[1]), z: q[2], t: q[3], ph: q[4] })),
+    events: plan.events.map(x => Object.assign({ ll: toLL(x.n, x.e) }, x)), end: plan.end, dur: plan.end.t,
+    land: toLL(plan.end.n, plan.end.e), ellipse, sector, unreachable: plan.end.unreachable || !jet,
+    targetInSector: !!(tgt && sectorNE && inPoly(tgt, sectorNE)),
+    free: { pts: free.pts.map(q => toLL(q[0], q[1])), burst: (x => x && { z: x.z, ll: toLL(x.n, x.e) })(free.events.find(x => x.type === 'burst')), land: toLL(free.end.n, free.end.e), dMin: dFree },
+    dMin, tOver, rides, ride: rides.length ? rides[0] : 11000, tJet: jet && climb ? climb.t - jet.t : 0,
+    jetSpeed: ng ? gs / ng : 0, towardAtRide: jet ? jet.tw : null,
+  };
+  drawPlan(); updatePlanStops(); S.dirty = true; queueWindDraw();
+}
+
+function drawPlan() {
+  if (!map) return;
+  M.plan.clearLayers(); M.free.clearLayers(); M.sector.clearLayers();
+  const P = S.plan; if (!P) return;
+  const flying = S.last && FLYING(S.last.phase) && S.lastRx;
+  const op = flying ? 0.45 : 0.95;
+  if (P.sector) L.polygon(P.sector, { color: '#c98500', weight: 1, opacity: .6, dashArray: '4 6', fillColor: '#c98500', fillOpacity: .08 })
+    .bindTooltip('Reachable by riding the jet stream (8–13 km)', { sticky: true }).addTo(M.sector);
+  L.polyline(P.free.pts, { color: '#aab5c1', weight: 2, opacity: .75 * op, dashArray: '3 7' })
+    .bindTooltip('Same balloon without altitude control', { sticky: true }).addTo(M.free);
+  if (P.free.burst) L.circleMarker(P.free.burst.ll, { radius: 4, color: '#aab5c1', weight: 2, fillColor: '#141a22', fillOpacity: 1 })
+    .bindTooltip(`Without control: bursts at ${(P.free.burst.z / 1000).toFixed(1)} km`, { direction: 'top' }).addTo(M.free);
+  L.marker(P.free.land, { icon: L.divIcon({ className: 'land-ico grey', html: '✕', iconSize: [16, 16], iconAnchor: [8, 8] }) })
+    .bindTooltip(`Without control: lands here${S.target ? ` · passes ${fmtDistTxt(P.free.dMin)} from the target` : ''}`, { direction: 'top' }).addTo(M.free);
+  // the planned route, one colour per phase
+  let seg = [], col = null;
+  const flush = () => { if (seg.length > 1) L.polyline(seg, { color: col, weight: 3.5, opacity: op, lineCap: 'round' }).addTo(M.plan); };
+  P.pts.forEach(q => {
+    const c = PCOL[q.ph] || PCOL[1];
+    if (c !== col) { flush(); seg = seg.length ? [seg[seg.length - 1]] : []; col = c; }
+    seg.push(q.ll);
+  });
+  flush();
+  L.polygon(P.ellipse, { color: '#9085e9', weight: 1.5, opacity: .8 * op, dashArray: '4 5', fillColor: '#9085e9', fillOpacity: .1 })
+    .bindTooltip('Landing area: 12 runs with the wind ±10 % and turned ±8°', { sticky: true }).addTo(M.plan);
+  const TXT = {
+    jet: x => `Jet stream: valve stops the climb at ${(x.ride / 1000).toFixed(1)} km · ${x.tw.toFixed(0)} m/s toward the target`,
+    steer: x => `Steering: ${(x.from / 1000).toFixed(2)} → ${(x.to / 1000).toFixed(2)} km for a better heading`,
+    climb: () => 'Drop ballast: climb to 20 km over the target',
+    noride: () => 'Target is not downwind of the jet stream: climb straight to 20 km',
+    loiter: () => `Over the target at 20 km: ${BAL.loiterMin} min loiter`,
+    cut: () => 'Cut-down: parachute descent', burst: () => 'Balloon bursts', land: () => 'Planned landing',
+  };
+  P.events.forEach(x => {
+    if (!TXT[x.type]) return;
+    const c = x.type === 'land' ? '#9085e9' : x.type === 'steer' ? '#c98500' : PCOL[{ jet: 4, climb: 5, noride: 5, loiter: 6, cut: 2, burst: 2 }[x.type]];
+    L.circleMarker(x.ll, { radius: x.type === 'steer' ? 4 : 6, color: '#fff', weight: 2, fillColor: c, fillOpacity: 1, opacity: op })
+      .bindTooltip(`${fmtT(x.t)} · ${TXT[x.type](x)}`, { direction: 'top' }).addTo(M.plan);
+  });
+  M.track.bringToFront(); M.pred.bringToFront();
+}
+
+function moveTargetGraphics() {
+  if (!map) return;
+  if (!S.target) { M.target.remove(); M.tgtArea.remove(); return; }
+  M.target.setLatLng(S.target).addTo(map).setTooltipContent(`Target · ${esc(S.targetName || 'Target')}`);
+  M.tgtArea.setLatLng(S.target).setRadius(footprintR()).addTo(map);
+}
+
+// ---------------------------------------------------------------------
+//  Wind layer on the map: arrows at the chosen altitude and time
+// ---------------------------------------------------------------------
+const WL = { c: null, raf: 0 };
+function initWindLayer() {
+  if (!map) return;
+  const pane = map.createPane('windPane');
+  pane.style.zIndex = 350; pane.style.pointerEvents = 'none';
+  WL.c = L.DomUtil.create('canvas', 'wind-canvas', pane);
+  map.on('move resize viewreset zoomend', queueWindDraw);
+  map.on('zoomstart', () => { WL.c.style.visibility = 'hidden'; });
+  map.on('zoomend', () => { WL.c.style.visibility = ''; });
+  map.on('mousemove', e => windCursor(e.latlng));
+  map.on('mouseout', () => windCursor(null));
+}
+function queueWindDraw() { if (!WL.raf) WL.raf = requestAnimationFrame(() => { WL.raf = 0; drawWindLayer(); }); }
+function drawWindLayer() {
+  const c = WL.c; if (!c || !map) return;
+  const size = map.getSize(), dpr = devicePixelRatio || 1;
+  L.DomUtil.setPosition(c, map.containerPointToLayerPoint([0, 0]));
+  c.style.width = size.x + 'px'; c.style.height = size.y + 'px';
+  if (c.width !== size.x * dpr || c.height !== size.y * dpr) { c.width = size.x * dpr; c.height = size.y * dpr; }
+  const g = c.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, size.x, size.y);
+  if (!S.showWind || !WIND.data) return;
+  const o = WIND.origin, z = S.windAlt, t = S.windT;
+  const p0 = map.latLngToContainerPoint(o), p1 = map.latLngToContainerPoint(offsetLatLon(o[0], o[1], 0, WIND.DX));
+  const sp = Math.hypot(p1.x - p0.x, p1.y - p0.y), stride = Math.max(1, Math.ceil(30 / sp)), cell = sp * stride;
+  const nodes = [];
+  for (let iy = 0; iy < WIND.NY; iy += stride) for (let ix = 0; ix < WIND.NX; ix += stride) {
+    const n = (iy - WIND.half) * WIND.DX, e = (ix - WIND.half) * WIND.DX;
+    const pt = map.latLngToContainerPoint(offsetLatLon(o[0], o[1], n, e));
+    if (pt.x < -cell || pt.y < -cell || pt.x > size.x + cell || pt.y > size.y + cell) continue;
+    nodes.push([pt, WIND.sample(n, e, z, t)]);
+  }
+  // rising (red) and sinking (blue) air
+  nodes.forEach(([pt, u]) => {
+    if (Math.abs(u[2]) < 0.05) return;
+    g.fillStyle = u[2] > 0 ? `rgba(230,103,103,${Math.min(.35, Math.abs(u[2]) * .45)})` : `rgba(57,135,229,${Math.min(.35, Math.abs(u[2]) * .45)})`;
+    g.fillRect(pt.x - cell / 2, pt.y - cell / 2, cell, cell);
+  });
+  // arrows: length and brightness = speed
+  g.lineCap = 'round'; g.lineJoin = 'round';
+  nodes.forEach(([pt, u]) => {
+    const s = Math.hypot(u[0], u[1]); if (s < 0.3) return;
+    const len = Math.max(6, cell * 0.85 * Math.min(1, s / 40)), dx = u[1] / s, dy = -u[0] / s;
+    const x0 = pt.x - dx * len / 2, y0 = pt.y - dy * len / 2, x1 = pt.x + dx * len / 2, y1 = pt.y + dy * len / 2;
+    const hl = Math.min(7, len * 0.35), hx = -dx * hl, hy = -dy * hl;
+    const path = () => { g.beginPath(); g.moveTo(x0, y0); g.lineTo(x1, y1); g.moveTo(x1 + hx - hy * .55, y1 + hy + hx * .55); g.lineTo(x1, y1); g.lineTo(x1 + hx + hy * .55, y1 + hy - hx * .55); };
+    path(); g.strokeStyle = 'rgba(0,0,0,.55)'; g.lineWidth = 3.5; g.stroke();
+    path(); g.strokeStyle = `rgba(240,244,248,${0.35 + 0.6 * Math.min(1, s / 40)})`; g.lineWidth = 1.6; g.stroke();
+  });
+}
+function windCursor(ll) {
+  if (!ll || !WIND.data) { setText('windCur', 'Point at the map to read the wind there'); return; }
+  const u = windAtLL(ll.lat, ll.lng, S.windAlt, S.windT), sp = Math.hypot(u[0], u[1]);
+  setText('windCur', `<b>${sp.toFixed(1)} m/s</b> from ${Math.round(fromDeg(u[0], u[1]))}°` +
+    (Math.abs(u[2]) >= 0.05 ? ` · air ${u[2] > 0 ? 'rising' : 'sinking'} <b>${Math.abs(u[2]).toFixed(1)} m/s</b>` : '') +
+    ` · ${ll.lat.toFixed(3)}, ${ll.lng.toFixed(3)}`);
+}
+function syncWindUI() {
+  $('rngAlt').value = S.windAlt; setText('vWindAlt', `${(S.windAlt / 1000).toFixed(1)} km`);
+  $('rngTime').value = S.windT; setText('vWindT', fmtT(S.windT));
+}
+// follow the balloon's altitude and the flight time
+function updateWindFollow() {
+  const p = S.last, live = p && S.lastRx && FLYING(p.phase);
+  let ch = false;
+  if (S.altFollow) {
+    const z = live ? p.alt : (S.plan ? S.plan.ride : 11000);
+    if (Math.abs(z - S.windAlt) > 100) { S.windAlt = Math.round(z / 50) * 50; ch = true; }
+  }
+  if (S.timeFollow) {
+    const t = p && S.lastRx && p.phase !== 0 ? Math.min(p.met, 43200) : 0;
+    if (Math.abs(t - S.windT) > 60 || (t === 0 && S.windT !== 0)) { S.windT = t; ch = true; }
+  }
+  if (ch) { syncWindUI(); queueWindDraw(); }
+}
+function exportWindCsv() {
+  ensureWind();
+  const o = WIND.origin, t = S.windT;
+  const rows = ['lat,lon,alt_m,t_after_launch_s,u_east_ms,v_north_ms,w_up_ms,speed_ms,from_deg'];
+  for (let iz = 0; iz < WIND.NZ; iz++) for (let iy = 0; iy < WIND.NY; iy++) for (let ix = 0; ix < WIND.NX; ix++) {
+    const n = (iy - WIND.half) * WIND.DX, e = (ix - WIND.half) * WIND.DX, z = iz * WIND.DZ, u = WIND.sample(n, e, z, t), ll = offsetLatLon(o[0], o[1], n, e);
+    rows.push([ll[0].toFixed(4), ll[1].toFixed(4), z, Math.round(t), u[1].toFixed(2), u[0].toFixed(2), u[2].toFixed(2), Math.hypot(u[0], u[1]).toFixed(2), Math.round(fromDeg(u[0], u[1]))].join(','));
+  }
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([rows.join('\n')], { type: 'text/csv' }));
+  a.download = `wind_matrix_${fmtT(t).replace(':', 'h').replace('+', '')}min.csv`;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+  log(`Wind matrix exported: ${rows.length - 1} points (all altitudes) at ${fmtT(t)}`);
+}
+
+// ---------------------------------------------------------------------
+//  Wind profile chart: speed and the part toward the target vs altitude
+// ---------------------------------------------------------------------
+let windHover = null;
+function drawWindProfile() {
+  const c = $('windChart'), dpr = devicePixelRatio || 1, W = c.clientWidth, H = c.clientHeight;
+  if (!W || !H || !WIND.data) return;
+  if (c.width !== W * dpr || c.height !== H * dpr) { c.width = W * dpr; c.height = H * dpr; }
+  const g = c.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, W, H);
+  const p = S.last, live = p && S.lastRx && FLYING(p.phase);
+  const pos = live ? [p.lat, p.lon] : S.launch, t = S.windT;
+  const db = S.target ? distBearing(pos, S.target) : null, en = db ? Math.cos(db.brg * D2R) : 0, ee = db ? Math.sin(db.brg * D2R) : 0;
+  const zTop = 25000, lv = [];
+  for (let z = 0; z <= zTop; z += 250) { const u = windAtLL(pos[0], pos[1], z, t); lv.push({ z, s: Math.hypot(u[0], u[1]), tw: u[0] * en + u[1] * ee, u }); }
+  const xMin = Math.min(-10, Math.floor(Math.min(...lv.map(l => db ? l.tw : 0)) / 10) * 10);
+  const xMax = Math.max(40, Math.ceil(Math.max(...lv.map(l => l.s)) / 10) * 10);
+  const Lm = 44, Rm = 40, Tm = 8, Bm = 22, pw = W - Lm - Rm, ph = H - Tm - Bm;
+  const X = v => Lm + (v - xMin) / (xMax - xMin) * pw, Y = z => Tm + ph - z / zTop * ph;
+  g.font = '11px ui-monospace,SF Mono,Consolas,monospace';
+  // jet band
+  g.fillStyle = 'rgba(201,133,0,.10)'; g.fillRect(Lm, Y(BAL.jetBand[1]), pw, Y(BAL.jetBand[0]) - Y(BAL.jetBand[1]));
+  g.fillStyle = '#7a8794'; g.textAlign = 'left'; g.textBaseline = 'top'; g.fillText('jet-stream band', Lm + 6, Y(BAL.jetBand[1]) + 3);
+  // grid
+  g.strokeStyle = '#212b36'; g.lineWidth = 1; g.textAlign = 'right'; g.textBaseline = 'middle';
+  for (let km = 0; km <= 25; km += 5) { const y = Math.round(Y(km * 1000)) + .5; g.beginPath(); g.moveTo(Lm, y); g.lineTo(Lm + pw, y); g.stroke(); g.fillText(`${km} km`, Lm - 6, y); }
+  g.textAlign = 'center'; g.textBaseline = 'top';
+  for (let v = xMin; v <= xMax; v += 10) { const x = Math.round(X(v)) + .5; g.strokeStyle = v === 0 ? '#4a5b6e' : '#212b36'; g.beginPath(); g.moveTo(x, Tm); g.lineTo(x, Tm + ph); g.stroke(); g.fillText(v + 10 > xMax ? `${v} m/s` : `${v}`, x, Tm + ph + 5); }
+  // 20 km recon altitude
+  g.strokeStyle = '#6b7785'; g.setLineDash([4, 5]); g.beginPath(); g.moveTo(Lm, Math.round(Y(BAL.reconAlt)) + .5); g.lineTo(Lm + pw, Math.round(Y(BAL.reconAlt)) + .5); g.stroke(); g.setLineDash([]);
+  // series
+  const line = (key, col) => { g.strokeStyle = col; g.lineWidth = 2; g.lineJoin = 'round'; g.beginPath(); lv.forEach((l, i) => { const x = X(l[key]), y = Y(l.z); i ? g.lineTo(x, y) : g.moveTo(x, y); }); g.stroke(); };
+  line('s', '#3987e5');
+  if (db) line('tw', '#c98500');
+  // direction the wind blows toward, every 2 km
+  g.strokeStyle = '#aab5c1'; g.lineWidth = 1.4;
+  for (let z = 1000; z <= 24000; z += 2000) {
+    const u = lv[Math.round(z / 250)].u, s = Math.hypot(u[0], u[1]) || 1, dx = u[1] / s * 8, dy = -u[0] / s * 8, x = Lm + pw + 20, y = Y(z);
+    g.beginPath(); g.moveTo(x - dx, y - dy); g.lineTo(x + dx, y + dy); g.moveTo(x + dx - dx * .45 - dy * .3, y + dy - dy * .45 + dx * .3); g.lineTo(x + dx, y + dy); g.lineTo(x + dx - dx * .45 + dy * .3, y + dy - dy * .45 - dx * .3); g.stroke();
+  }
+  // balloon altitude
+  if (live) {
+    const y = Math.round(Y(Math.min(zTop, p.alt))) + .5;
+    g.strokeStyle = '#e9eef3'; g.setLineDash([2, 4]); g.beginPath(); g.moveTo(Lm, y); g.lineTo(Lm + pw, y); g.stroke(); g.setLineDash([]);
+    g.fillStyle = '#e9eef3'; g.textAlign = 'right'; g.textBaseline = 'bottom'; g.fillText(`balloon ${(p.alt / 1000).toFixed(1)} km`, Lm + pw - 4, y - 2);
+  }
+  // legend (2 series)
+  g.textAlign = 'left'; g.textBaseline = 'middle';
+  const items = [['wind speed', '#3987e5']]; if (db) items.push(['toward the target', '#c98500']);
+  let lx = Lm + pw - 4 - items.reduce((a, [tx]) => a + g.measureText(tx).width + 30, 0);
+  items.forEach(([tx, col]) => { g.fillStyle = col; g.fillRect(lx, Tm + 8, 16, 3); g.fillStyle = '#aab5c1'; g.fillText(tx, lx + 21, Tm + 9.5); lx += g.measureText(tx).width + 30; });
+  // hover
+  const tip = $('windTip');
+  if (windHover != null && windHover > Tm && windHover < Tm + ph) {
+    const z = Math.max(0, Math.min(zTop, (Tm + ph - windHover) / ph * zTop)), l = lv[Math.round(z / 250)], y = Y(l.z);
+    g.strokeStyle = '#7a8794'; g.lineWidth = 1; g.beginPath(); g.moveTo(Lm, Math.round(y) + .5); g.lineTo(Lm + pw, Math.round(y) + .5); g.stroke();
+    [['s', '#3987e5'], ...(db ? [['tw', '#c98500']] : [])].forEach(([k, col]) => { g.fillStyle = col; g.strokeStyle = '#141a22'; g.lineWidth = 2; g.beginPath(); g.arc(X(l[k]), y, 4.5, 0, 7); g.fill(); g.stroke(); });
+    tip.hidden = false; tip.style.left = Math.min(Math.max(X(l.s), 130), W - 130) + 'px'; tip.style.top = y + 'px';
+    tip.textContent = `${(l.z / 1000).toFixed(2)} km · ${l.s.toFixed(1)} m/s from ${Math.round(fromDeg(l.u[0], l.u[1]))}°` + (db ? ` · ${l.tw.toFixed(1)} m/s toward target` : '');
+  } else tip.hidden = true;
+}
+$('windChart').addEventListener('mousemove', e => { windHover = e.offsetY; drawWindProfile(); });
+$('windChart').addEventListener('mouseleave', () => { windHover = null; drawWindProfile(); });
+
+// ---------------------------------------------------------------------
+//  Mission card
+// ---------------------------------------------------------------------
+function renderMission() {
+  const P = S.plan, p = S.last, f = S.source === 'demo' && demo.f && p ? demo.f : null;
+  const b = $('misBadge'); b.textContent = f ? 'LIVE · DEMO' : 'PLAN'; b.className = 'badge ' + (f ? 'real' : '');
+  const bar = (id, frac) => { $(id).style.width = `${Math.max(0, Math.min(100, frac * 100)).toFixed(1)}%`; };
+  if (!P) return;
+  if (f) {
+    const pos = [p.lat, p.lon], db = S.target ? distBearing(pos, S.target) : null;
+    setText('misPhase', PNAME[f.phase] + (f.phase === PH.JET ? ` at ${(f.zSet / 1000).toFixed(1)} km` : ''));
+    if (f.phase === PH.LANDED) setText('misNote', 'press Reset to pad to fly again');
+    setText('misTgt', db ? `${fmtDist(db.d)} <span class="u">${point(db.brg)}</span>` : '—');
+    const pr = demo.pred;
+    setText('misEta', f.phase === PH.LOITER ? 'over it now' : pr && pr.tOver != null && pr.tOver > f.t + 30 ? `${fmtT(pr.tOver)} <span class="u">in ${fmtDur(pr.tOver - f.t)}</span>` : '—');
+    setText('misRide', f.zSet != null && f.attached ? `${(f.zSet / 1000).toFixed(1)}<span class="u">km</span>` : '—');
+    if (db) { const u = windAtLL(pos[0], pos[1], f.z, f.t); setText('misToward', `${(u[0] * Math.cos(db.brg * D2R) + u[1] * Math.sin(db.brg * D2R)).toFixed(1)}<span class="u">m/s</span>`); }
+    else setText('misToward', '—');
+    setText('misLift', `${f.freeLift >= 0 ? '+' : ''}${f.freeLift.toFixed(2)}<span class="u">kg</span>`);
+    const gs = Math.hypot(f.vn, f.ve);
+    setText('misGs', `${gs.toFixed(0)}<span class="u">m/s · ${(gs * 3.6).toFixed(0)} km/h</span>`);
+    setText('misBallast', `${f.mBallast.toFixed(2)} kg`); bar('barBallast', f.mBallast / BAL.mBallast0);
+    setText('misHe', `${(100 * f.mHe / BAL.mHe0).toFixed(0)} %`); bar('barHe', f.mHe / BAL.mHe0);
+  } else {
+    const db = S.target ? distBearing(S.launch, S.target) : null;
+    setText('misPhase', !S.target ? 'Set a target on the map' : P.unreachable ? 'Target is not downwind' : !P.targetInSector ? 'Target outside the reachable sector'
+      : S.source === 'serial' && p && FLYING(p.phase) ? 'Plan · for comparison' : `Plan ready${S.source === 'serial' ? '' : ' · press Launch'}`);
+    setText('misTgt', db ? `${fmtDist(db.d)} <span class="u">${point(db.brg)} of launch</span>` : '—');
+    setText('misEta', P.tOver != null && !P.unreachable ? `${fmtT(P.tOver)} <span class="u">closest ${fmtDistTxt(P.dMin)}</span>` : '—');
+    const r = P.rides.length ? [Math.min(...P.rides), Math.max(...P.rides)] : null;
+    setText('misRide', r ? (r[0] === r[1] ? `${(r[0] / 1000).toFixed(1)}<span class="u">km</span>` : `${(r[0] / 1000).toFixed(1)}–${(r[1] / 1000).toFixed(1)}<span class="u">km</span>`) : '—');
+    setText('misToward', P.towardAtRide != null ? `${P.towardAtRide.toFixed(1)}<span class="u">m/s</span>` : '—');
+    setText('misLift', `+${BAL.freeLift0.toFixed(2)}<span class="u">kg at launch</span>`);
+    setText('misGs', P.jetSpeed ? `${P.jetSpeed.toFixed(0)}<span class="u">m/s · ${(P.jetSpeed * 3.6).toFixed(0)} km/h</span>` : '—');
+    setText('misBallast', `${BAL.mBallast0.toFixed(2)} → ${P.end.mBallast.toFixed(2)} kg`); bar('barBallast', P.end.mBallast / BAL.mBallast0);
+    setText('misHe', `100 → ${(100 * P.end.mHe / BAL.mHe0).toFixed(0)} %`); bar('barHe', P.end.mHe / BAL.mHe0);
+  }
+  setText('misGsK', f ? 'Ground speed' : 'Ground speed in the jet');
+  // plan summary
+  let txt = '';
+  if (!S.target) txt = 'Press <b>Set target</b> and click the area to observe. The plan then shows how the balloon rides the jet stream there.';
+  else if (P.unreachable) txt = `The target is not downwind of the jet stream from here, so the balloon climbs straight to 20 km. Move the target into the <b>amber sector</b> or move the launch site upwind.`;
+  else {
+    const lb = distBearing(S.launch, P.land);
+    txt = `Plan: ride the jet stream for <b>${fmtDur(P.tJet)}</b> at about <b>${P.jetSpeed.toFixed(0)} m/s</b>, over the target at <b>${fmtT(P.tOver)}</b> (closest ${fmtDistTxt(P.dMin)}), land ${fmtDistTxt(lb.d)} ${point(lb.brg)} of launch. ` +
+      `Without altitude control the same balloon bursts at ${P.free.burst ? (P.free.burst.z / 1000).toFixed(1) : '—'} km and passes <b>${fmtDistTxt(P.free.dMin)}</b> from the target.` +
+      (P.targetInSector ? '' : ' <span class="warn-t">The target is outside the amber sector, so the jet stream cannot carry the balloon right over it.</span>');
+    const ps = P.stops ? allStops().map(st => [st, P.stops[st.key]]) : [], out = ps.filter(([, x]) => !x || !x.shot);
+    if (ps.length) txt += out.length ? ` <span class="warn-t">The camera cannot reach ${out.map(([st]) => `stop ${st.no} (${esc(st.name)})`).join(', ')}: more than ${GIMBAL.range / 1000} km from the route or below ${GIMBAL.minAgl / 1000} km. Move it closer to the route.</span>`
+      : ` The camera passes all ${ps.length} recon stops.`;
+  }
+  setText('misPlan', txt);
+  if (!f || f.phase !== PH.LANDED) setText('misNote', S.source === 'serial' ? 'payload flies the simple profile' : '');
+}
+
+// =====================================================================
+//  Simulated balloon camera + vehicle detection (vision/vision_server.py)
+//  The server renders what the payload camera would see from satellite
+//  imagery and runs the detector; this page shows the picture with the
+//  vehicles circled and puts them on the map.
+// =====================================================================
+const VIS = {
+  base: location.protocol.startsWith('http') && location.port === '8765' ? '' : 'http://localhost:8765',
+  online: null, info: null, busy: false, last: null, cur: null, img: null, hover: null, sel: null, lastAuto: 0, view: null,
+  z: 1, px: 0, py: 0, drag: null,           // picture zoom and pan
+  caps: [], capN: 0,                        // every picture this session (the intel report)
+  show: { veh: true, infra: true, air: true, other: false },
+};
+const catOf = cls => (DCLS[cls] || ['Object', 'other'])[1];
+const clsName = cls => (DCLS[cls] || ['Object'])[0];
+const shown = d => VIS.show[catOf(d.cls)];
+function countText(dets, max = 4) {
+  const n = {}; dets.forEach(d => { n[d.cls] = (n[d.cls] || 0) + 1; });
+  const rows = Object.entries(n).sort((a, b) => b[1] - a[1]);
+  if (!rows.length) return 'nothing found';
+  return rows.slice(0, max).map(([c, k]) => `${k} ${k === 1 ? clsName(+c).toLowerCase().replace(' / bus', '') : DPLURAL[c]}`).join(' · ') + (rows.length > max ? ' · …' : '');
+}
+
+async function visHealth() {
+  try {
+    const r = await fetch(VIS.base + '/api/health', { cache: 'no-store', signal: AbortSignal.timeout(2500) });
+    setVisOnline(true, await r.json());
+  } catch (e) { setVisOnline(false, null); }
+}
+function setVisOnline(on, info) {
+  if (on !== VIS.online && VIS.online !== null) log(on ? `Vision server connected · ${info.model} · ${info.source}` : 'Vision server stopped', on ? 'good' : 'warn');
+  if (on && VIS.online === null) log(`Vision server connected · ${info.model} · ${info.source}`, 'good');
+  VIS.online = on; if (info) VIS.info = info;
+  $('visState').className = 'cam-status ' + (on ? 'on' : 'off');
+  setText('visText', on ? `Vision server · ${VIS.info.model} · ${VIS.info.source}` : 'Vision server not running - double-click <code>vision\\start_vision.bat</code>');
+  $('btnCapture').disabled = !on || VIS.busy; $('btnAim').disabled = !on;
+  if (!VIS.last) setText('camEmpty', on
+    ? 'In flight the gimbal camera takes a picture at every recon stop.<br>Press <b>Capture</b> for a picture now, or <b>Aim at map…</b> and click any spot.'
+    : 'The camera runs in a small Python program next to this page.<br>Open the <code>hab_recon\\vision</code> folder and double-click <code>start_vision.bat</code>.<br>It needs Python 3.12 or 3.13 from python.org with “Add python.exe to PATH” ticked.');
+}
+
+// where the camera is: the flying balloon, else 20 km over the target, else over the launch site
+function camPose() {
+  const p = S.last;
+  if (p && S.lastRx && FLYING(p.phase) && p.alt - S.groundAlt > 500) return { lat: p.lat, lon: p.lon, agl: p.alt - S.groundAlt, heading: p.heading ?? 0, why: 'balloon', title: 'Balloon camera', bal: [p.lat, p.lon, p.alt], met: p.met };
+  const at = S.target || S.launch;
+  return { lat: at[0], lon: at[1], agl: BAL.reconAlt - S.groundAlt, heading: 0, why: S.target ? 'over the target' : 'over the launch site', title: S.target ? `Over ${S.targetName}` : 'Over the launch site' };
+}
+
+// pictures are taken one at a time; recon stops wait in this queue
+const CAPQ = [];
+function queueCapture(pose) { CAPQ.push(pose); pumpCaptures(); }
+function pumpCaptures() { if (!VIS.busy && CAPQ.length) camCapture(CAPQ.shift()); }
+
+async function camCapture(pose) {
+  if (VIS.busy) return false;
+  if (!VIS.online) {
+    if (pose.stopKey) { const st = S.stopRun[pose.stopKey]; if (st) st.state = 'missed'; drawStops(); }
+    else { setTab('cam'); log('Start the vision server first: double-click vision\\start_vision.bat', 'warn'); }
+    return false;
+  }
+  VIS.busy = true; $('btnCapture').disabled = true;
+  setText('camCount', pose.stopKey ? `Taking stop ${pose.no}…` : 'Capturing…');
+  setText('camMeta', pose.stopKey ? `${esc(pose.title)} · looking around for the busiest spot…` : `${pose.why} · ${(pose.agl / 1000).toFixed(1)} km above ground · heading ${Math.round(pose.heading)}°`);
+  const q = new URLSearchParams({ lat: pose.lat.toFixed(7), lon: pose.lon.toFixed(7), agl: Math.round(pose.agl), heading: pose.heading.toFixed(1), focal: pose.focal || $('selLens').value });
+  if (pose.search > 1) q.set('search', pose.search);
+  try {
+    const r = await fetch(`${VIS.base}/api/capture?${q}`);
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.error || 'capture failed');
+    j.pose = pose; addCapture(j);
+    return true;
+  } catch (e) {
+    setText('camCount', 'No picture'); setText('camMeta', esc(e.message));
+    log(`Camera${pose.stopKey ? ` · stop ${pose.no}` : ''}: ${e.message}`, 'bad');
+    if (pose.stopKey && S.stopRun[pose.stopKey]) { S.stopRun[pose.stopKey].state = 'failed'; drawStops(); }
+    return false;
+  } finally { VIS.busy = false; $('btnCapture').disabled = !VIS.online; S.dirty = true; setTimeout(pumpCaptures, 0); }
+}
+
+async function camUpload(file) {
+  if (!VIS.online) { log('Start the vision server first', 'warn'); return; }
+  VIS.busy = true; setText('camCount', 'Detecting…');
+  try {
+    const r = await fetch(`${VIS.base}/api/detect`, { method: 'POST', body: file, headers: { 'Content-Type': file.type || 'application/octet-stream' } });
+    const j = await r.json(); if (!j.ok) throw new Error(j.error);
+    j.pose = { why: `your image: ${file.name}`, title: `Your image · ${file.name}` }; addCapture(j);
+  } catch (e) { setText('camCount', 'Failed'); log(`Detector: ${e.message}`, 'bad'); }
+  finally { VIS.busy = false; setTimeout(pumpCaptures, 0); }
+}
+
+function addCapture(j) {
+  const p = j.pose;
+  const cap = { id: ++VIS.capN, j, met: p.met != null ? p.met : (S.last && S.lastRx && S.last.phase !== 0 ? S.last.met : null),
+    stopKey: p.stopKey || null, no: p.no || null, name: p.stopName || null, kind: p.kind || null, time: clock() };
+  VIS.caps.push(cap);
+  if (cap.stopKey && S.stopRun[cap.stopKey]) Object.assign(S.stopRun[cap.stopKey], { state: 'done', capId: cap.id, summary: countText(j.detections.filter(shown), 2) });
+  log(`Camera${cap.no ? ` · stop ${cap.no} ${cap.name}` : ''}: ${countText(j.detections.filter(shown))}` +
+    `${j.footprint_m ? ` in ${j.footprint_m[0].toFixed(0)} × ${j.footprint_m[1].toFixed(0)} m` : ''}${j.shift_m > 30 ? ` · framed ${j.shift_m} m from the aim point` : ''} (${j.t_detect.toFixed(1)} s)`,
+    j.detections.length ? 'good' : '');
+  showCapture(cap);
+  if (S.tab !== 'cam' && S.tab !== 'rep') setTab('cam');
+  renderReport(); drawStops(); S.dirty = true;
+}
+
+function showCapture(cap) {
+  const j = cap.j;
+  VIS.cur = cap; VIS.last = j; VIS.img = null; VIS.sel = null; VIS.hover = null; VIS.z = 1; VIS.px = VIS.py = 0;
+  const im = new Image(); im.onload = () => { if (VIS.cur === cap) { VIS.img = im; $('camEmpty').hidden = true; drawCam(); } }; im.src = j.image;
+  renderCapSelect(); renderCamSide(); drawCamMap(); drawCam();
+  [...$('repBody').querySelectorAll('tr')].forEach(tr => tr.classList.toggle('cur', +tr.dataset.id === cap.id));
+}
+
+function capTitle(c) {
+  const p = c.j.pose || {};
+  return `#${c.id}${c.met != null ? ' · ' + fmtT(c.met) : ''} · ${c.no ? `stop ${c.no} ${c.name}` : (p.title || p.why || 'picture')}`;
+}
+function renderCapSelect() {
+  const sel = $('selCap');
+  sel.disabled = !VIS.caps.length;
+  sel.innerHTML = VIS.caps.length ? VIS.caps.slice().reverse().map(c => `<option value="${c.id}"${c === VIS.cur ? ' selected' : ''}>${esc(capTitle(c))}</option>`).join('') : '<option>no pictures yet</option>';
+}
+$('selCap').onchange = e => { const c = VIS.caps.find(x => x.id === +e.target.value); if (c) showCapture(c); };
+
+function renderCats() {
+  $('camCats').innerHTML = Object.entries(DCAT).map(([k, [nm, c]]) => `<button class="cat" data-k="${k}" aria-pressed="${VIS.show[k]}"><i style="border-color:${c}"></i>${nm}</button>`).join('');
+}
+$('camCats').onclick = e => {
+  const b = e.target.closest('.cat'); if (!b) return;
+  VIS.show[b.dataset.k] = !VIS.show[b.dataset.k]; renderCats();
+  if (VIS.cur) { renderCamSide(); drawCamMap(); drawCam(); }
+  renderReport();
+};
+
+// side panel: counts, picture facts, list of what was found
+function renderCamSide() {
+  const j = VIS.last; if (!j) return;
+  const p = j.pose || {}, vis = j.detections.filter(shown), hidden = j.detections.length - vis.length;
+  setText('camCount', esc(countText(vis, 3)));
+  setText('camMeta', [
+    esc(p.title || p.why || 'Picture') + (VIS.cur && VIS.cur.met != null ? ` · ${fmtT(VIS.cur.met)}` : ''),
+    p.bal ? `balloon ${(p.bal[2] / 1000).toFixed(1)} km up${p.off != null ? `, ${fmtDistTxt(p.off)} away` : ''} · range ${fmtDistTxt(j.agl)}${p.offnadir != null ? ` · ${p.offnadir}° off-nadir` : ''}`
+      : j.agl ? `${(j.agl / 1000).toFixed(1)} km above ground · heading ${Math.round(j.heading)}°` : '',
+    j.gsd ? `${j.focal ? j.focal + ' mm lens · ' : ''}${j.gsd.toFixed(2)} m per pixel` + (j.footprint_m ? ` · picture ${j.footprint_m[0].toFixed(0)} × ${j.footprint_m[1].toFixed(0)} m` : '') : `${j.w} × ${j.h} px`,
+    j.search > 1 ? `looked around ${j.searched_m[0]} × ${j.searched_m[1]} m, ${j.shift_m < 30 ? 'framed on the aim point' : `framed ${j.shift_m} m from the aim point`}` : '',
+    j.source_mpp && j.gsd && j.source_mpp > j.gsd * 1.15 ? `<span class="warn-t">satellite data only ${j.source_mpp.toFixed(2)} m/px here - picture is blurrier than the camera</span>` : `source: ${esc(j.source || '')}${j.zoom ? ' z' + j.zoom : ''}`,
+    `${j.model} · ${j.windows} windows · ${j.t_fetch != null ? `imagery ${j.t_fetch.toFixed(1)} s · ` : ''}detection ${j.t_detect.toFixed(1)} s`,
+    hidden ? `${hidden} hidden (${Object.entries(DCAT).filter(([k]) => !VIS.show[k]).map(([, v]) => v[0].toLowerCase()).join(', ')})` : '',
+  ].filter(Boolean).join('<br>'));
+  const ul = $('vehList'); ul.innerHTML = '';
+  const order = { veh: 0, air: 1, infra: 2, other: 3 };
+  const rows = vis.slice().sort((a, b) => (order[catOf(a.cls)] - order[catOf(b.cls)]) || b.conf - a.conf).slice(0, 250);
+  if (!rows.length) ul.innerHTML = `<li class="empty">${j.gsd > 0.6 ? 'Nothing found - at this resolution cars are only a pixel or two. Use the 250 mm lens.' : 'Nothing found here. Try a car park, a motorway, an airport or a port.'}</li>`;
+  rows.forEach(d => {
+    const li = document.createElement('li'); li.className = 'veh';
+    li.innerHTML = `<i class="ic" style="border-color:${DCAT[catOf(d.cls)][1]}"></i><span class="t1"></span><span class="cf"></span><span class="t2"></span>`;
+    li.querySelector('.t1').textContent = clsName(d.cls);
+    li.querySelector('.cf').textContent = `${Math.round(d.conf * 100)}%`;
+    li.querySelector('.t2').textContent = (d.lat != null ? `${d.lat.toFixed(5)}, ${d.lon.toFixed(5)}` : `pixel ${Math.round(d.u)}, ${Math.round(d.v)}`) + (d.length_m ? ` · ${d.length_m} m` : '');
+    li.onclick = () => { VIS.sel = d; drawCam(); if (map && d.lat != null) { $('chkFollow').checked = false; map.setView([d.lat, d.lon], 19); } };
+    ul.appendChild(li);
+  });
+}
+
+// map: the current picture's footprint and detections, the other pictures as faint outlines
+function drawCamMap() {
+  if (!map) return;
+  M.cam.clearLayers();
+  VIS.caps.forEach(c => {
+    if (c === VIS.cur || !c.j.footprint) return;
+    L.polygon(c.j.footprint, { color: '#aab5c1', weight: 1, opacity: .7, dashArray: '3 5', fillOpacity: .04 })
+      .bindTooltip(esc(capTitle(c)), { sticky: true }).on('click', () => { showCapture(c); setTab('cam'); }).addTo(M.cam);
+  });
+  const j = VIS.last; if (!j || j.lat == null || !j.footprint) return;
+  L.polygon(j.footprint, { color: '#f0f4f8', weight: 1.5, dashArray: '5 5', fill: false, interactive: false }).addTo(M.cam);
+  j.detections.filter(shown).forEach(d => L.circleMarker([d.lat, d.lon], { radius: catOf(d.cls) === 'veh' ? 4.5 : 6.5, color: '#0c1016', weight: 1.5, fillColor: DCAT[catOf(d.cls)][1], fillOpacity: .95 })
+    .bindTooltip(`${clsName(d.cls)} · ${Math.round(d.conf * 100)}%<br>${d.lat.toFixed(6)}, ${d.lon.toFixed(6)}${d.length_m ? ` · ${d.length_m} m` : ''}`, { direction: 'top' }).addTo(M.cam));
+}
+
+// operator view: picture, rotated boxes by kind, crosshair, overlay with time and geometry, scale bar, north arrow
+function obb(d, k, ox, oy) {
+  const a = (d.angle || 0) * D2R, c = Math.cos(a), s = Math.sin(a);
+  return [[-d.w / 2, -d.h / 2], [d.w / 2, -d.h / 2], [d.w / 2, d.h / 2], [-d.w / 2, d.h / 2]].map(([x, y]) => [ox + (d.u + x * c - y * s) * k, oy + (d.v + x * s + y * c) * k]);
+}
+function drawCam() {
+  const c = $('camCanvas'), dpr = devicePixelRatio || 1, W = c.clientWidth, H = c.clientHeight;
+  if (!W || !H) return;
+  if (c.width !== W * dpr || c.height !== H * dpr) { c.width = W * dpr; c.height = H * dpr; }
+  const g = c.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, W, H);
+  const j = VIS.last, im = VIS.img; if (!j || !im) return;
+  const k = Math.min(W / j.w, H / j.h) * VIS.z, ox = (W - j.w * k) / 2 + VIS.px, oy = (H - j.h * k) / 2 + VIS.py;
+  VIS.view = { k, ox, oy, W, H };
+  g.imageSmoothingQuality = 'high'; g.drawImage(im, ox, oy, j.w * k, j.h * k);
+  const vis = j.detections.filter(shown), hi = VIS.sel || VIS.hover, labels = vis.length <= 60;
+  const box = (d, col, lw) => {
+    const p = obb(d, k, ox, oy);
+    g.beginPath(); p.forEach(([x, y], i) => i ? g.lineTo(x, y) : g.moveTo(x, y)); g.closePath();
+    g.strokeStyle = 'rgba(0,0,0,.65)'; g.lineWidth = lw + 1.8; g.stroke();
+    g.strokeStyle = col; g.lineWidth = lw; g.stroke();
+    return p;
+  };
+  const label = (d, p, col) => {
+    const t = `${clsName(d.cls)} ${Math.round(d.conf * 100)}%`;
+    g.font = '500 11px ui-monospace,Consolas,monospace'; const tw = g.measureText(t).width;
+    const x = Math.min(W - tw - 8, Math.max(2, (ox + d.u * k) - tw / 2 - 3)), y = Math.max(Math.max(0, oy) + 52, Math.min(...p.map(q => q[1])) - 4);
+    g.fillStyle = 'rgba(10,14,18,.82)'; g.fillRect(x, y - 12, tw + 7, 15);
+    g.fillStyle = col; g.fillRect(x, y - 12, 2, 15);
+    g.fillStyle = '#f2f5f8'; g.textAlign = 'left'; g.textBaseline = 'alphabetic'; g.fillText(t, x + 4, y);
+  };
+  vis.forEach(d => { const col = DCAT[catOf(d.cls)][1], p = box(d, col, d === hi ? 3 : 1.6); if (labels && d !== hi) label(d, p, col); });
+  if (hi && shown(hi)) { const p = box(hi, '#ffffff', 3); label(hi, p, DCAT[catOf(hi.cls)][1]); }
+  // crosshair on the aim point
+  const cx = ox + j.w * k / 2, cy = oy + j.h * k / 2;
+  g.strokeStyle = 'rgba(0,0,0,.6)'; g.lineWidth = 3; g.beginPath(); g.moveTo(cx - 18, cy); g.lineTo(cx + 18, cy); g.moveTo(cx, cy - 18); g.lineTo(cx, cy + 18); g.stroke();
+  g.strokeStyle = 'rgba(242,245,248,.85)'; g.lineWidth = 1; g.stroke();
+  // overlay on the picture: what and when on top, geometry at the bottom
+  const p = j.pose || {}, cap = VIS.cur;
+  const L0 = Math.max(0, ox), R0 = Math.min(W, ox + j.w * k), T0 = Math.max(0, oy), B0 = Math.min(H, oy + j.h * k), IW = R0 - L0;
+  const title = (p.title || p.why || 'Picture').toUpperCase().slice(0, 48);
+  const right = [cap && cap.met != null ? fmtMET(cap.met) : '', p.offnadir != null ? (p.offnadir < 12 ? 'gimbal nadir' : `gimbal ${p.offnadir}° off-nadir`) : '',
+    j.heading != null ? (Math.round(j.heading) ? `top = ${Math.round(j.heading)}°` : 'north up') : ''].filter(Boolean).join(' · ');
+  g.font = '700 13px system-ui,"Segoe UI",sans-serif'; const tw1 = g.measureText(title).width;
+  g.font = '500 11px ui-monospace,Consolas,monospace'; const tw2 = g.measureText(right).width;
+  const twoLines = tw1 + tw2 + 36 > IW, band = twoLines ? 50 : 36;
+  let grd = g.createLinearGradient(0, T0, 0, T0 + band); grd.addColorStop(0, 'rgba(0,0,0,.62)'); grd.addColorStop(1, 'rgba(0,0,0,0)'); g.fillStyle = grd; g.fillRect(L0, T0, IW, band);
+  grd = g.createLinearGradient(0, B0 - 36, 0, B0); grd.addColorStop(0, 'rgba(0,0,0,0)'); grd.addColorStop(1, 'rgba(0,0,0,.66)'); g.fillStyle = grd; g.fillRect(L0, B0 - 36, IW, 36);
+  g.save(); g.shadowColor = '#000'; g.shadowBlur = 3; g.fillStyle = '#f2f5f8'; g.textBaseline = 'alphabetic';
+  g.font = '700 13px system-ui,"Segoe UI",sans-serif'; g.textAlign = 'left'; g.fillText(title, L0 + 10, T0 + 19);
+  g.font = '500 11px ui-monospace,Consolas,monospace';
+  if (twoLines) { g.textAlign = 'left'; g.fillText(right, L0 + 10, T0 + 35); } else { g.textAlign = 'right'; g.fillText(right, R0 - 10, T0 + 19); }
+  g.textAlign = 'left';
+  g.fillText([p.bal ? `ALT ${(p.bal[2] / 1000).toFixed(1)} km` : '', j.agl ? `${p.bal ? 'RANGE' : 'AGL'} ${(j.agl / 1000).toFixed(1)} km` : '', j.gsd ? `${j.gsd.toFixed(2)} m/px` : ''].filter(Boolean).join(' · '), L0 + 10, B0 - 10);
+  g.textAlign = 'right'; g.fillText(`${vis.length} object${vis.length === 1 ? '' : 's'}`, R0 - 10, B0 - 10);
+  g.restore();
+  // scale bar (bottom right, above the band)
+  if (j.gsd) {
+    const nice = [5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000], target = 100 / k * j.gsd;
+    const m = nice.reduce((a, b) => Math.abs(b - target) < Math.abs(a - target) ? b : a), px = m / j.gsd * k;
+    const x1 = R0 - 12, y = B0 - 42;
+    g.strokeStyle = 'rgba(0,0,0,.7)'; g.lineWidth = 5; g.beginPath(); g.moveTo(x1 - px, y); g.lineTo(x1, y); g.stroke();
+    g.strokeStyle = '#fff'; g.lineWidth = 2; g.beginPath(); g.moveTo(x1 - px, y - 4); g.lineTo(x1 - px, y); g.lineTo(x1, y); g.lineTo(x1, y - 4); g.stroke();
+    g.save(); g.shadowColor = '#000'; g.shadowBlur = 3; g.fillStyle = '#fff'; g.font = '11px ui-monospace,monospace'; g.textAlign = 'right'; g.textBaseline = 'bottom';
+    g.fillText(m >= 1000 ? `${m / 1000} km` : `${m} m`, x1, y - 5); g.restore();
+  }
+  // north arrow (the picture's top is the camera heading)
+  if (j.heading != null) {
+    const x = R0 - 24, y = T0 + band + 20, a = -j.heading * D2R;
+    g.save(); g.translate(x, y); g.rotate(a);
+    g.fillStyle = 'rgba(12,16,22,.75)'; g.beginPath(); g.arc(0, 0, 16, 0, 7); g.fill();
+    g.fillStyle = '#ff8a83'; g.beginPath(); g.moveTo(0, -12); g.lineTo(5, 3); g.lineTo(-5, 3); g.closePath(); g.fill();
+    g.fillStyle = '#fff'; g.font = '700 9px system-ui'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText('N', 0, 8);
+    g.restore();
+  }
+}
+function camHit(e) {
+  const j = VIS.last, v = VIS.view; if (!j || !v) return null;
+  const u = (e.offsetX - v.ox) / v.k, w = (e.offsetY - v.oy) / v.k, pad = 6 / v.k;
+  let best = null, ba = Infinity;
+  j.detections.filter(shown).forEach(d => {
+    const a = (d.angle || 0) * D2R, c = Math.cos(a), s = Math.sin(a), dx = u - d.u, dy = w - d.v;
+    const x = dx * c + dy * s, y = -dx * s + dy * c;
+    if (Math.abs(x) <= d.w / 2 + pad && Math.abs(y) <= d.h / 2 + pad && d.w * d.h < ba) { ba = d.w * d.h; best = d; }
+  });
+  return best;
+}
+// scroll to zoom, drag to pan, double-click to fit
+$('camCanvas').addEventListener('wheel', e => {
+  const v = VIS.view; if (!VIS.last || !v) return;
+  e.preventDefault();
+  const z2 = Math.max(1, Math.min(16, VIS.z * (e.deltaY < 0 ? 1.25 : 0.8))), u = (e.offsetX - v.ox) / v.k, w = (e.offsetY - v.oy) / v.k;
+  const k2 = v.k / VIS.z * z2;
+  VIS.px = e.offsetX - u * k2 - (v.W - VIS.last.w * k2) / 2; VIS.py = e.offsetY - w * k2 - (v.H - VIS.last.h * k2) / 2;
+  VIS.z = z2; if (z2 === 1) VIS.px = VIS.py = 0;
+  drawCam();
+}, { passive: false });
+$('camCanvas').addEventListener('mousedown', e => { VIS.drag = { x: e.offsetX, y: e.offsetY, px: VIS.px, py: VIS.py, moved: false }; });
+addEventListener('mouseup', () => { setTimeout(() => { VIS.drag = null; }, 0); });
+$('camCanvas').addEventListener('dblclick', () => { VIS.z = 1; VIS.px = VIS.py = 0; drawCam(); });
+$('camCanvas').addEventListener('mousemove', e => {
+  if (VIS.drag && e.buttons) {
+    const dx = e.offsetX - VIS.drag.x, dy = e.offsetY - VIS.drag.y;
+    if (Math.abs(dx) + Math.abs(dy) > 3) VIS.drag.moved = true;
+    if (VIS.drag.moved && VIS.z > 1) { VIS.px = VIS.drag.px + dx; VIS.py = VIS.drag.py + dy; drawCam(); $('camTip').hidden = true; return; }
+  }
+  const d = camHit(e), tip = $('camTip');
+  if (d !== VIS.hover) { VIS.hover = d; drawCam(); }
+  if (d) {
+    tip.hidden = false; tip.style.left = e.offsetX + 'px'; tip.style.top = (e.offsetY - 8) + 'px';
+    tip.textContent = `${clsName(d.cls)} ${Math.round(d.conf * 100)}%` + (d.lat != null ? ` · ${d.lat.toFixed(5)}, ${d.lon.toFixed(5)}` : '') + (d.length_m ? ` · ${d.length_m} m` : '');
+  } else tip.hidden = true;
+});
+$('camCanvas').addEventListener('mouseleave', () => { VIS.hover = null; $('camTip').hidden = true; drawCam(); });
+$('camCanvas').addEventListener('click', e => { if (VIS.drag && VIS.drag.moved) return; const d = camHit(e); if (d && map && d.lat != null) { VIS.sel = d; drawCam(); $('chkFollow').checked = false; map.setView([d.lat, d.lon], 19); } });
+$('btnCapture').onclick = () => camCapture(camPose());
+$('btnAim').onclick = () => setPick(S.picking === 'aim' ? null : 'aim');
+$('fileImg').onchange = e => { const f = e.target.files[0]; if (f) camUpload(f); e.target.value = ''; };
+// a picture straight down every 10 s while the balloon flies above 8 km (off by default)
+setInterval(() => {
+  if (!$('chkAuto').checked || !VIS.online || VIS.busy || CAPQ.length) return;
+  const p = S.last; if (!(p && S.lastRx && FLYING(p.phase) && p.alt - S.groundAlt > 8000)) return;
+  if (performance.now() - VIS.lastAuto < 10000) return;
+  VIS.lastAuto = performance.now(); camCapture(camPose());
+}, 1000);
+setInterval(visHealth, 5000);
+
+// =====================================================================
+//  Recon stops: places the gimbal camera photographs as the balloon passes
+// =====================================================================
+const newKey = () => Math.random().toString(36).slice(2, 9);
+function loadStops() {
+  try {
+    const j = JSON.parse(localStorage.getItem('habrecon.stops.v1') || 'null');
+    if (Array.isArray(j)) return j.filter(s => isFinite(s.lat) && isFinite(s.lon)).map(s => Object.assign({ key: newKey() }, s));
+  } catch (e) { /* no storage: defaults */ }
+  return RECON.stops.map(s => Object.assign({ key: newKey() }, s));
+}
+function saveStops() { try { localStorage.setItem('habrecon.stops.v1', JSON.stringify(S.stops)); } catch (e) { /* not kept */ } }
+// stops in flight order as numbered, plus the target as the last one
+function allStops() {
+  const list = S.stops.map((s, i) => Object.assign({ no: i + 1, ground: S.groundAlt, search: 2, kind: 'other' }, s));
+  if (S.target) list.push({ no: list.length + 1, key: 'target', target: true, name: S.targetName || 'Target', kind: 'target',
+    lat: S.target[0], lon: S.target[1], ground: S.targetGround != null ? S.targetGround : S.groundAlt, search: 2 });
+  return list;
+}
+const newRun = () => ({ state: 'wait', closest: Infinity, best: null });
+// One picture per stop, at the closest point of the pass, when the balloon is within range and high enough
+// (the target: at 20 km). Used for the plan and live in flight. Returns the pose to shoot from, once.
+function gimbalWatch(st, s, lat, lon, alt, phase, t) {
+  if (st.state !== 'wait') return null;
+  const d = distBearing([lat, lon], [s.lat, s.lon]).d, agl = alt - s.ground;
+  st.closest = Math.min(st.closest, d);
+  const up = s.target ? alt >= BAL.reconAlt - 1000 && phase !== PH.DESCENT && phase !== PH.LANDED : phase === PH.ASCENT || phase >= PH.JET;
+  const ok = up && agl >= GIMBAL.minAgl && d <= GIMBAL.range;
+  if (ok && (!st.best || d <= st.best.d)) { st.best = { d, agl, lat, lon, alt, t }; return null; }
+  if (st.best && (!ok || d > st.best.d + 150)) { st.state = 'shot'; return st.best; }
+  return null;
+}
+const shotGsd = sh => Math.hypot(sh.d, sh.agl) * GIMBAL.pixelUm * 1e-6 / (GIMBAL.focal * 1e-3);
+function updatePlanStops() {
+  if (!S.plan) return;
+  S.plan.stops = {};
+  allStops().forEach(s => {
+    const st = newRun(); let shot = null;
+    for (const q of S.plan.pts) { const r = gimbalWatch(st, s, q.ll[0], q.ll[1], q.z, q.ph, q.t); if (r) { shot = r; break; } }
+    if (!shot && st.best) shot = st.best;
+    S.plan.stops[s.key] = { shot: shot && Object.assign({ slant: Math.hypot(shot.d, shot.agl), gsd: shotGsd(shot) }, shot), closest: st.closest };
+  });
+  drawStops(); S.dirty = true;
+}
+// live: called for every telemetry packet in flight
+function gimbalTick(p) {
+  if (!$('chkGimbal').checked || !S.source) return;
+  allStops().forEach(s => {
+    const st = S.stopRun[s.key] || (S.stopRun[s.key] = newRun());
+    const sh = gimbalWatch(st, s, p.lat, p.lon, p.alt, p.phase, p.met);
+    if (!sh) return;
+    const slant = Math.hypot(sh.d, sh.agl);
+    if (!VIS.online) { st.state = 'missed'; log(`Stop ${s.no} ${s.name} passed - vision server not running, no picture`, 'warn'); drawStops(); return; }
+    st.state = 'queued';
+    log(`Gimbal: stop ${s.no} ${s.name} · ${sh.d < 1500 ? 'overhead' : fmtDistTxt(sh.d) + ' beside the track'} · range ${fmtDistTxt(slant)}`);
+    queueCapture({ lat: s.lat, lon: s.lon, agl: slant, heading: 0, focal: GIMBAL.focal, search: s.search, stopKey: s.key, no: s.no, stopName: s.name, kind: s.kind,
+      met: sh.t, bal: [sh.lat, sh.lon, sh.alt], off: sh.d, offnadir: Math.round(Math.atan2(sh.d, sh.agl) / D2R), title: `Stop ${s.no} · ${s.name}`, why: `stop ${s.no} · ${s.name}` });
+  });
+}
+const inFlight = () => !!(S.source && S.last && S.lastRx && S.last.phase !== 0);
+
+function drawStops() {
+  if (!map || !M.stops) return;
+  M.stops.clearLayers();
+  allStops().forEach(s => {
+    const ps = S.plan && S.plan.stops ? S.plan.stops[s.key] : null, run = S.stopRun[s.key];
+    if (ps && ps.shot && ps.shot.d > 1500) L.polyline([[ps.shot.lat, ps.shot.lon], [s.lat, s.lon]], { color: '#e9eef3', weight: 1.2, opacity: .75, dashArray: '2 5', interactive: false }).addTo(M.stops);
+    if (s.target) return;                                   // the target has its own marker
+    const cls = run && run.state === 'done' ? ' done' : run && (run.state === 'missed' || run.state === 'failed') ? ' miss' : '';
+    const m = L.marker([s.lat, s.lon], { draggable: true, zIndexOffset: 400, icon: L.divIcon({ className: '', html: `<div class="stop-ico${cls}">${s.no}</div>`, iconSize: [20, 20], iconAnchor: [10, 10] }) })
+      .bindTooltip(esc(s.name), { permanent: true, direction: 'right', offset: [12, 0], className: 'stop-lbl' }).addTo(M.stops);
+    m.on('dragend', e => {
+      const ll = e.target.getLatLng(), k = S.stops.findIndex(x => x.key === s.key); if (k < 0) return;
+      S.stops[k].lat = ll.lat; S.stops[k].lon = ll.lng; saveStops(); updatePlanStops();
+      log(`Stop ${s.no} ${s.name} moved to ${ll.lat.toFixed(5)}, ${ll.lng.toFixed(5)}`);
+    });
+    m.on('click', () => { const c = run && run.capId && VIS.caps.find(x => x.id === run.capId); if (c) { showCapture(c); setTab('cam'); } });
+  });
+}
+
+// right-hand card: every stop with its planned pass, or what happened in flight
+function renderStops() {
+  const list = allStops(), live = inFlight();
+  let reach = 0;
+  const html = list.map(s => {
+    const ps = S.plan && S.plan.stops ? S.plan.stops[s.key] : null, sh = ps && ps.shot, run = S.stopRun[s.key];
+    if (sh) reach++;
+    let st = sh ? fmtT(sh.t) : 'out of reach', cls = sh ? '' : 'out';
+    let sub = sh ? `${sh.d < 1500 ? 'overhead' : fmtDistTxt(sh.d) + ' off the track'} · range ${fmtDistTxt(sh.slant)} · ${sh.gsd.toFixed(2)} m/px`
+      : `closest ${isFinite(ps && ps.closest) ? fmtDistTxt(ps.closest) : '—'} · the camera needs ≤ ${GIMBAL.range / 1000} km${s.target ? ' at 20 km' : ''}`;
+    if (live) {
+      const r = run || newRun();
+      st = { wait: sh ? `ETA ${fmtT(sh.t)}` : 'not on the route', shot: 'taking…', queued: 'taking…', done: '✓ picture', missed: 'missed', failed: 'no picture' }[r.state];
+      if (r.state === 'done') { cls = 'done'; sub = r.summary || sub; } else if (r.state === 'missed' || r.state === 'failed') cls = 'out';
+      if (r.state === 'missed') sub = 'vision server was not running';
+    }
+    return `<li class="${cls}" data-key="${s.key}"><span class="no${s.target ? ' tgt' : ''}">${s.no}</span>` +
+      `<span class="nm" title="${esc(s.name)}">${esc(s.name)} <span class="kd">· ${s.target ? 'target' : esc(s.kind)}</span></span><span class="st">${esc(st)}</span>` +
+      `<span class="sub">${sub}</span>${s.target ? '' : `<button class="x" title="Remove this stop" aria-label="Remove stop ${s.no}">✕</button>`}</li>`;
+  }).join('');
+  const out = html || '<li class="empty">No stops. Press <b>Add stop</b> on the map and click a place.</li>';
+  if (renderStops.last !== out) { renderStops.last = out; $('stopList').innerHTML = out; }
+  setText('stopsHint', list.length ? `${reach} of ${list.length} on the route` : '');
+}
+$('stopList').onclick = e => {
+  const li = e.target.closest('li[data-key]'); if (!li) return;
+  const key = li.dataset.key, s = allStops().find(x => x.key === key); if (!s) return;
+  if (e.target.closest('.x')) {
+    S.stops = S.stops.filter(x => x.key !== key); saveStops(); updatePlanStops();
+    log(`Stop ${s.no} ${s.name} removed`); return;
+  }
+  const run = S.stopRun[key], c = run && run.capId && VIS.caps.find(x => x.id === run.capId);
+  if (c) { showCapture(c); setTab('cam'); }
+  if (map) { $('chkFollow').checked = false; map.setView([s.lat, s.lon], Math.max(map.getZoom(), 11)); }
+};
+$('btnStopsDefault').onclick = () => {
+  S.stops = RECON.stops.map(s => Object.assign({ key: newKey() }, s)); saveStops();
+  S.target = [RECON.target.lat, RECON.target.lon]; S.targetName = RECON.target.name; S.targetGround = RECON.target.ground;
+  moveTargetGraphics(); demo.retarget(); scheduleReplan();
+  log(`Default mission: Sofia → ${S.targetName} with ${S.stops.length} recon stops`);
+};
+function openStopForm(ll) {
+  if (!map) return;
+  const div = document.createElement('div'); div.className = 'stop-form';
+  div.innerHTML = `<b>New recon stop</b><input type="text" maxlength="40" aria-label="Name"><select aria-label="Kind">${KINDS.map(k => `<option>${k}</option>`).join('')}</select>
+    <span class="hint">${ll[0].toFixed(5)}, ${ll[1].toFixed(5)}</span><div class="cam-row"><button class="btn small primary">Add</button><button class="btn small">Cancel</button></div>`;
+  const [inp, sel] = [div.querySelector('input'), div.querySelector('select')], [bAdd, bCancel] = div.querySelectorAll('button');
+  inp.value = `Stop ${S.stops.length + 1}`;
+  const pop = L.popup({ closeButton: false, minWidth: 220 }).setLatLng(ll).setContent(div).openOn(map);
+  setTimeout(() => { inp.focus(); inp.select(); }, 50);
+  const add = () => {
+    const name = inp.value.trim() || `Stop ${S.stops.length + 1}`;
+    S.stops.push({ key: newKey(), name, kind: sel.value, lat: ll[0], lon: ll[1], ground: S.groundAlt, search: 2 });
+    saveStops(); map.closePopup(pop); updatePlanStops();
+    const sh = S.plan && S.plan.stops && S.plan.stops[S.stops[S.stops.length - 1].key].shot;
+    log(`Stop ${S.stops.length} ${name} added` + (sh ? ` - picture at ${fmtT(sh.t)} from ${fmtDistTxt(sh.slant)}` : ' - out of reach of the camera on this route'), sh ? '' : 'warn');
+  };
+  bAdd.onclick = add; bCancel.onclick = () => map.closePopup(pop);
+  inp.onkeydown = e => { if (e.key === 'Enter') add(); if (e.key === 'Escape') map.closePopup(pop); };
+}
+
+// =====================================================================
+//  Intel report: one line per picture, exported as CSV and KML
+// =====================================================================
+function renderReport() {
+  const tb = $('repBody');
+  if (!VIS.caps.length) {
+    tb.innerHTML = '<tr><td colspan="7" class="l" style="color:var(--muted)">No pictures yet. In flight the gimbal camera takes one at every recon stop; Capture and Aim at map add more.</td></tr>';
+    setText('repSum', 'The report fills in as the camera takes pictures.'); return;
+  }
+  let tot = 0;
+  const stops = new Set();
+  tb.innerHTML = VIS.caps.map(c => {
+    const v = c.j.detections.filter(shown), best = v.reduce((a, d) => Math.max(a, d.conf), 0), p = c.j.pose || {};
+    tot += v.length; if (c.stopKey) stops.add(c.stopKey);
+    return `<tr data-id="${c.id}" class="${c === VIS.cur ? 'cur' : ''}"><td>${c.met != null ? fmtT(c.met) : esc(c.time)}</td>` +
+      `<td class="l">${c.no ? `<span class="no-s">${c.no}</span>${esc(c.name)}` : esc(p.title || p.why || 'Picture')}</td><td class="l">${esc(countText(v, 5))}</td>` +
+      `<td>${v.length}</td><td>${v.length ? Math.round(best * 100) + '%' : '–'}</td><td>${c.j.agl ? fmtDistTxt(c.j.agl) : '–'}</td><td>${c.j.gsd ? c.j.gsd.toFixed(2) : '–'}</td></tr>`;
+  }).join('');
+  setText('repSum', `${VIS.caps.length} picture${VIS.caps.length === 1 ? '' : 's'} · ${tot} objects shown · ${stops.size} recon stop${stops.size === 1 ? '' : 's'} covered`);
+}
+$('repBody').onclick = e => { const tr = e.target.closest('tr[data-id]'); if (!tr) return; const c = VIS.caps.find(x => x.id === +tr.dataset.id); if (c) { showCapture(c); setTab('cam'); } };
+const stamp = () => new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-');
+function download(name, text, type) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([text], { type })); a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+}
+const csvq = t => /[",\n]/.test(String(t)) ? `"${String(t).replace(/"/g, '""')}"` : String(t);
+function exportReportCsv() {
+  if (!VIS.caps.length) { log('Intel report is empty - nothing to export', 'warn'); return; }
+  const rows = ['picture,mission_time,stop,stop_kind,class,category,confidence,lat,lon,length_m,width_m,balloon_lat,balloon_lon,balloon_alt_m,range_m,m_per_px,imagery'];
+  VIS.caps.forEach(c => {
+    const p = c.j.pose || {}, b = p.bal || [];
+    c.j.detections.forEach(d => rows.push([c.id, c.met != null ? fmtMET(c.met) : c.time, csvq(c.name || p.title || p.why || ''), c.kind || '', csvq(clsName(d.cls)), csvq(DCAT[catOf(d.cls)][0]),
+      d.conf.toFixed(3), d.lat != null ? d.lat.toFixed(7) : '', d.lon != null ? d.lon.toFixed(7) : '', d.length_m != null ? d.length_m : '', d.width_m != null ? d.width_m : '',
+      b[0] != null ? b[0].toFixed(6) : '', b[1] != null ? b[1].toFixed(6) : '', b[2] != null ? Math.round(b[2]) : '', c.j.agl ? Math.round(c.j.agl) : '', c.j.gsd ? c.j.gsd.toFixed(3) : '', csvq(c.j.source || '')].join(',')));
+  });
+  download(`habrecon_intel_${stamp()}.csv`, rows.join('\n'), 'text/csv');
+  log(`Intel report exported: ${rows.length - 1} detections in ${VIS.caps.length} pictures (CSV)`);
+}
+function exportReportKml() {
+  if (!VIS.caps.length) { log('Intel report is empty - nothing to export', 'warn'); return; }
+  const kcol = h => 'ff' + h.slice(5, 7) + h.slice(3, 5) + h.slice(1, 3);        // #rrggbb -> aabbggrr
+  const styles = Object.entries(DCAT).map(([k, [, c]]) => `<Style id="${k}"><IconStyle><color>${kcol(c)}</color><scale>0.6</scale><Icon><href>http://maps.google.com/mapfiles/kml/shapes/placemark_circle.png</href></Icon></IconStyle><LabelStyle><scale>0</scale></LabelStyle></Style>`).join('')
+    + '<Style id="foot"><LineStyle><color>ffffffff</color><width>2</width></LineStyle><PolyStyle><fill>0</fill></PolyStyle></Style>'
+    + '<Style id="bal"><IconStyle><scale>0.9</scale><Icon><href>http://maps.google.com/mapfiles/kml/shapes/airports.png</href></Icon></IconStyle></Style>';
+  const pt = (lat, lon, alt) => `${lon.toFixed(7)},${lat.toFixed(7)},${alt != null ? Math.round(alt) : 0}`;
+  const folders = VIS.caps.map(c => {
+    const j = c.j, p = j.pose || {}, v = j.detections.filter(shown);
+    let f = `<Folder><name>${esc(capTitle(c))}</name><description>${esc(countText(v, 8))}</description>`;
+    if (j.footprint) f += `<Placemark><name>Picture footprint</name><styleUrl>#foot</styleUrl><Polygon><outerBoundaryIs><LinearRing><coordinates>${[...j.footprint, j.footprint[0]].map(q => pt(q[0], q[1])).join(' ')}</coordinates></LinearRing></outerBoundaryIs></Polygon></Placemark>`;
+    if (p.bal) f += `<Placemark><name>Balloon ${(p.bal[2] / 1000).toFixed(1)} km</name><styleUrl>#bal</styleUrl><Point><altitudeMode>absolute</altitudeMode><coordinates>${pt(p.bal[0], p.bal[1], p.bal[2])}</coordinates></Point></Placemark>`;
+    v.forEach(d => { if (d.lat != null) f += `<Placemark><name>${esc(clsName(d.cls))} ${Math.round(d.conf * 100)}%</name><description>${d.lat.toFixed(6)}, ${d.lon.toFixed(6)}${d.length_m ? ` · ${d.length_m} m` : ''}</description><styleUrl>#${catOf(d.cls)}</styleUrl><Point><coordinates>${pt(d.lat, d.lon)}</coordinates></Point></Placemark>`; });
+    return f + '</Folder>';
+  }).join('');
+  const kml = `<?xml version="1.0" encoding="UTF-8"?>\n<kml xmlns="http://www.opengis.net/kml/2.2"><Document><name>HAB-RECON intel report ${stamp()}</name>${styles}${folders}</Document></kml>\n`;
+  download(`habrecon_intel_${stamp()}.kml`, kml, 'application/vnd.google-earth.kml+xml');
+  log(`Intel report exported for Google Earth: ${VIS.caps.length} pictures (KML)`);
+}
+$('btnRepCsv').onclick = exportReportCsv;
+$('btnRepKml').onclick = exportReportKml;
+let clearArmed = null;
+$('btnRepClear').onclick = () => {
+  const b = $('btnRepClear');
+  if (!clearArmed) { b.classList.add('armed'); b.textContent = 'Confirm clear'; clearArmed = setTimeout(() => { b.classList.remove('armed'); b.textContent = 'Clear'; clearArmed = null; }, 3000); return; }
+  clearTimeout(clearArmed); clearArmed = null; b.classList.remove('armed'); b.textContent = 'Clear';
+  VIS.caps = []; VIS.cur = null; VIS.last = null; VIS.img = null; CAPQ.length = 0;
+  if (map) M.cam.clearLayers();
+  $('camEmpty').hidden = false; if (VIS.online != null) setVisOnline(VIS.online, VIS.info);
+  setText('camCount', '—'); setText('camMeta', ''); $('vehList').innerHTML = '';
+  renderCapSelect(); renderReport(); drawCam(); log('Intel report cleared');
+};
+
+// =====================================================================
+//  Commands
+// =====================================================================
+async function sendCommand(cmd, lat = 0, lon = 0) {
+  if (!S.source) { log('Connect the ground station (or start demo mode) first', 'warn'); return; }
+  S.cmdSeq = (S.cmdSeq % 65535) + 1;
+  const seq = S.cmdSeq, la = Math.round(lat * 1e7), lo = Math.round(lon * 1e7);
+  S.pending = { seq, cmd, t: performance.now() };
+  $('cmdStatus').innerHTML = `<b>${CMD_NAME[cmd]}</b> sent… waiting for acknowledgement`;
+  log(`→ ${CMD_NAME[cmd]} sent (#${seq})`);
+  if (S.source === 'serial') {
+    try { await serial.writer.write(`C,${cmd},${seq},${la},${lo}\n`); }
+    catch (e) { log('Could not write to ground station: ' + e.message, 'bad'); }
+  } else if (S.source === 'demo') demo.command(cmd, seq, lat, lon);
+}
+function checkPending() {
+  if (S.pending && performance.now() - S.pending.t > 4000) {
+    $('cmdStatus').innerHTML = `<b>${CMD_NAME[S.pending.cmd]}</b> - no acknowledgement. Payload out of range?`;
+    log(`${CMD_NAME[S.pending.cmd]} not acknowledged`, 'bad');
+    S.pending = null;
+  }
+}
+$('cLaunch').onclick = () => sendCommand(CMD.LAUNCH);
+$('cReset').onclick = () => sendCommand(CMD.RESET);
+$('cCal').onclick = () => sendCommand(CMD.CAL_MAG);
+let cutArmed = null;
+$('cCut').onclick = () => {
+  const b = $('cCut');
+  if (!cutArmed) { b.classList.add('armed'); b.textContent = 'Confirm cut-down'; cutArmed = setTimeout(() => { b.classList.remove('armed'); b.textContent = 'Cut down'; cutArmed = null; }, 3000); return; }
+  clearTimeout(cutArmed); cutArmed = null; b.classList.remove('armed'); b.textContent = 'Cut down';
+  sendCommand(CMD.CUTDOWN);
+};
+function setPick(mode) {
+  S.picking = mode || false;
+  $('mapwrap').classList.toggle('picking', !!S.picking);
+  $('btnSetLaunch').classList.toggle('active', S.picking === 'launch'); $('btnSetTarget').classList.toggle('active', S.picking === 'target');
+  $('btnAim').classList.toggle('active', S.picking === 'aim'); $('btnAddStop').classList.toggle('active', S.picking === 'stop');
+  $('pickHint').textContent = S.picking === 'target' ? 'Click the map to set the target area' : S.picking === 'aim' ? 'Click the map: the camera looks straight down at it from 20 km'
+    : S.picking === 'stop' ? 'Click the map where the camera should look' : 'Click the map to set the launch site';
+}
+$('btnSetLaunch').onclick = () => setPick(S.picking === 'launch' ? null : 'launch');
+$('btnSetTarget').onclick = () => setPick(S.picking === 'target' ? null : 'target');
+$('btnAddStop').onclick = () => setPick(S.picking === 'stop' ? null : 'stop');
+function onMapPick(ll) {
+  if (!S.picking) return;
+  const mode = S.picking; setPick(null);
+  if (mode === 'aim') { camCapture({ lat: ll[0], lon: ll[1], agl: BAL.reconAlt - S.groundAlt, heading: 0, why: 'aimed from 20 km', title: 'Aimed from 20 km' }); return; }
+  if (mode === 'stop') { openStopForm(ll); return; }
+  if (mode === 'target') {
+    S.target = ll; S.targetName = 'Target'; S.targetGround = S.groundAlt; moveTargetGraphics(); demo.retarget();
+    log(`Target set to ${ll[0].toFixed(4)}, ${ll[1].toFixed(4)} - ${fmtDistTxt(distBearing(S.launch, ll).d)} ${point(distBearing(S.launch, ll).brg)} of launch`);
+    scheduleReplan(); S.dirty = true; return;
+  }
+  S.launch = ll; moveLaunchGraphics();
+  log(`Launch site set to ${ll[0].toFixed(5)}, ${ll[1].toFixed(5)}${S.last && S.last.phase !== 0 ? ' (used after the next reset)' : ''}`);
+  if (S.source) sendCommand(CMD.SET_LAUNCH, ll[0], ll[1]);
+  S.dirty = true;
+}
+$('btnFit').onclick = () => {
+  if (!map) return;
+  const pts = [S.launch, ...S.track, ...(S.pred ? S.pred.pts : []), ...(S.plan ? S.plan.pts.map(q => q.ll) : []), ...(S.target ? [S.target] : []), ...S.stops.map(st => [st.lat, st.lon])];
+  $('chkFollow').checked = false;
+  if (pts.length > 1) map.fitBounds(L.latLngBounds(pts).pad(0.15)); else map.setView(S.launch, 9);
+};
+
+// =====================================================================
+//  Web Serial link to the XIAO ESP32-C6 ground receiver
+// =====================================================================
+const serial = { port: null, reader: null, writer: null };
+function handleLine(line) {
+  if (line.startsWith('T,')) {
+    const [, hex, rssi] = line.split(',');
+    const p = parseTelemetry(fromHex(hex || ''));
+    if (p) ingest(p, parseInt(rssi, 10));
+  } else if (line.startsWith('H,')) {
+    const h = parseHealth(fromHex(line.split(',')[1] || ''));
+    if (h) ingestHealth(h);
+  } else if (line.startsWith('I,')) {
+    const msg = line.slice(2).trim();
+    if (msg !== 'alive') log('Ground station: ' + msg);
+  }
+}
+async function connectSerial() {
+  if (!('serial' in navigator)) { log('Web Serial is not available - open this page in Chrome or Edge', 'bad'); alert('Open this page in Chrome or Edge (Web Serial is needed).'); return; }
+  let port;
+  try { port = await navigator.serial.requestPort(); await port.open({ baudRate: 115200 }); }
+  catch (e) { log('Connection cancelled: ' + e.message, 'warn'); return; }
+  demo.stop();
+  serial.port = port; S.source = 'serial'; S.lastRx = 0; S.seen.clear(); S.uniq = [];
+  const dec = new TextDecoderStream(); port.readable.pipeTo(dec.writable).catch(() => {});
+  serial.reader = dec.readable.getReader();
+  const enc = new TextEncoderStream(); enc.readable.pipeTo(port.writable).catch(() => {});
+  serial.writer = enc.writable.getWriter();
+  $('btnConnect').textContent = 'Disconnect'; $('btnDemo').disabled = true;
+  log('Ground station connected', 'good');
+  let buf = '';
+  try {
+    while (true) {
+      const { value, done } = await serial.reader.read();
+      if (done) break;
+      buf += value;
+      let i;
+      while ((i = buf.indexOf('\n')) >= 0) { handleLine(buf.slice(0, i).replace(/\r$/, '')); buf = buf.slice(i + 1); }
+      if (buf.length > 8192) buf = '';
+    }
+  } catch (e) { log('Ground station disconnected (' + e.message + ')', 'bad'); }
+  await disconnectSerial(true);
+}
+async function disconnectSerial(silent) {
+  if (!serial.port) return;
+  const port = serial.port; serial.port = null;
+  try { await serial.reader.cancel(); } catch (e) {}
+  try { serial.reader.releaseLock(); } catch (e) {}
+  try { await serial.writer.close(); } catch (e) {}
+  try { await port.close(); } catch (e) {}
+  S.source = null; $('btnConnect').textContent = 'Connect ground station'; $('btnDemo').disabled = false;
+  if (!silent) log('Ground station disconnected');
+  S.dirty = true;
+}
+$('btnConnect').onclick = () => serial.port ? disconnectSerial(false) : connectSerial();
+
+// =====================================================================
+//  Demo mode - simulates payload + radio in the browser (no hardware)
+// =====================================================================
+const demo = {
+  timer: null, f: null, pred: null, speed: 60,
+  start() {
+    if (this.timer) return;
+    Object.assign(this, { f: null, ctx: null, pred: null, lastPred: 0, launch: S.launch.slice(), origin: S.launch.slice(),
+      seq: 0, t0: performance.now(), ack: 0, lastCmd: -1, det: null, lastDet: 0, calUntil: 0, ffUntil: 0, hdg: 30, p0: 94400,
+      hAuto: false, calStart: 0, calibrated: false, hcount: 0, hseq: 0, lastRoll: null, lastPitch: null, speed: +$('selSpeed').value });
+    S.source = 'demo'; S.lastRx = 0; S.seen.clear(); S.uniq = [];
+    this.timer = setInterval(() => this.tick(), 200);
+    $('btnDemo').textContent = 'Stop demo'; $('btnDemo').classList.add('active'); $('btnConnect').disabled = true;
+    log('Demo mode: simulated payload flying the jet-stream mission - press Launch', 'good');
+  },
+  stop() {
+    if (!this.timer) return;
+    clearInterval(this.timer); this.timer = null; S.source = null; this.f = null; this.pred = null;
+    $('btnDemo').textContent = 'Demo mode'; $('btnDemo').classList.remove('active'); $('btnConnect').disabled = false;
+    log('Demo mode stopped'); S.dirty = true;
+  },
+  get phase() { return this.f ? this.f.phase : 0; },
+  retarget() { if (this.ctx) { this.ctx.target = S.target ? llToNE(this.origin, S.target[0], S.target[1]) : null; this.lastPred = 0; } },
+  step(dt) { if (this.f) flightStep(this.f, this.ctx, dt); },
+  predict() {
+    const f = this.f;
+    if (!f || !FLYING(f.phase)) { this.pred = null; return; }
+    const r = simulate(f, Object.assign({}, this.ctx), 2, 30), o = this.origin, toLL = (n, e) => offsetLatLon(o[0], o[1], n, e);
+    const cut = r.events.find(x => x.type === 'cut' || x.type === 'burst');
+    let tOver = null, dMin = Infinity;
+    if (this.ctx.target) r.pts.forEach(q => { const d = Math.hypot(this.ctx.target[0] - q[0], this.ctx.target[1] - q[1]); if (d < dMin) { dMin = d; tOver = q[3]; } });
+    this.pred = { end: toLL(r.end.n, r.end.e), pts: r.pts.map(q => toLL(q[0], q[1])), burst: cut ? toLL(cut.n, cut.e) : null,
+      burstLabel: cut ? (cut.type === 'cut' ? `Predicted cut-down · ${fmtT(cut.t)}` : 'Predicted burst') : '', tOver, dMin };
+  },
+  tick() {
+    const now = performance.now(), t = (now - this.t0) / 1000;
+    let dt = 0.2 * this.speed; while (dt > 0) { const h = Math.min(dt, 1); this.step(h); dt -= h; }
+    if (this.ctx && this.ctx.events.length) {
+      this.ctx.events.forEach(ev => {
+        if (ev.type === 'steer') log(`Steering: ${(ev.from / 1000).toFixed(2)} → ${(ev.to / 1000).toFixed(2)} km - ${ev.tw.toFixed(0)} m/s toward the target there (was ${ev.was.toFixed(0)})`);
+        if (ev.type === 'noride') log('Target is not downwind of the jet stream - climbing straight to 20 km', 'warn');
+        if (ev.type === 'cut' && this.f && this.f.phase === PH.DESCENT && !this.userCut) log(`Loiter finished after ${BAL.loiterMin} min - automatic cut-down`);
+      });
+      this.ctx.events.length = 0; this.userCut = false;
+    }
+    if (now - this.lastPred > 1000) { this.lastPred = now; this.predict(); }
+    const f = this.f, alt = f ? f.z : CFG.LAUNCH_ALT_M;
+    const flying = FLYING(this.phase);
+    const roll = flying ? 6 * Math.sin(2 * Math.PI * t / 3.1) : 0.4 * Math.sin(t);
+    const pitch = flying ? 4 * Math.sin(2 * Math.PI * t / 3.4 + 1) : -0.3;
+    if (flying) this.hdg = (this.hdg + 1.2) % 360;
+    const [lat, lon] = !f ? this.launch : offsetLatLon(this.origin[0], this.origin[1], f.n, f.e);
+    if (flying && now - this.lastDet > 7000 && !VIS.online) {   // made-up detections only without the real detector
+      this.lastDet = now;
+      const lab = [1, 2, 2, 4][Math.floor(Math.random() * 4)], u = Math.random() - 0.5, v = Math.random() - 0.5;
+      const ne = projectToGround(u, v, CFG.CAM_HFOV * D2R, CFG.CAM_VFOV * D2R, roll * D2R, pitch * D2R, this.hdg * D2R, alt - CFG.LAUNCH_ALT_M);
+      const pos = ne ? offsetLatLon(lat, lon, ne[0], ne[1]) : [0, 0];
+      this.det = { label: lab, conf: 55 + Math.floor(Math.random() * 41), t: now, lat: pos[0], lon: pos[1] };
+    }
+    const press = this.p0 + 3 * (Math.random() - 0.5);
+    let flags = FLAG.GPS_SIM | FLAG.MAG_OK | FLAG.BARO_OK | FLAG.IMU_OK;
+    if (now < this.calUntil) flags |= FLAG.MAG_CAL;
+    if (now < this.ffUntil) flags |= FLAG.FREEFALL;
+    const pkt = {
+      hops: 0, flags, seq: this.seq++, uptime: now - this.t0 + 5000, met: f ? f.t : 0, lat, lon, alt,
+      baroAlt: 44330 * (1 - Math.pow(press / this.p0, 0.190295)), press, temp: 23.4 + 0.1 * Math.sin(t / 20) + 0.03 * Math.random(),
+      roll, pitch, heading: this.hdg, vz: f ? f.vz : 0, accel: now < this.ffUntil ? 0.1 : 1 + 0.02 * (Math.random() - 0.5), phase: this.phase,
+      detLabel: this.det ? this.det.label : 0, detConf: this.det ? this.det.conf : 0,
+      detAge: this.det ? Math.min(254, Math.floor((now - this.det.t) / 100)) : 255,
+      detLat: this.det ? this.det.lat : 0, detLon: this.det ? this.det.lon : 0, ack: this.ack,
+    };
+    if (++this.hcount % 5 === 0) this.healthTick(now, roll, pitch, flying);
+    if (Math.random() < 0.02) return;  // ~2 % packet loss, like a real link
+    handleLine(`T,${toHex(encodeTelemetry(pkt))},${-38 - Math.round(Math.random() * 8)}`);
+  },
+  // simulated GY-91 vs F405 comparison, 1x per second (same flow as the real payload)
+  healthTick(now, roll, pitch, flying) {
+    const t = (now - this.t0) / 1000;
+    if (!this.hAuto && t > 5) { this.hAuto = true; this.calStart = now; this.calibrated = false; }
+    const calibrating = this.calStart && now - this.calStart < 20000;
+    if (this.calStart && !calibrating) this.calibrated = true;
+    const N = () => (Math.random() + Math.random() + Math.random() - 1.5) * 2;       // ~ normal(0, 1)
+    const gx = this.lastRoll == null ? 0 : (roll - this.lastRoll), gy = this.lastPitch == null ? 0 : (pitch - this.lastPitch);
+    this.lastRoll = roll; this.lastPitch = pitch;
+    const hdg = ((this.hdg + 180) % 360) - 180;
+    //  [true value, F405 bias, GY-91 noise, F405 noise, extra error in flight]   (Pa, C, deg, deg/s, g)
+    const chans = [[this.p0, 4, 6, 2.5, 0], [23.4, 6.5, 0.02, 0.02, 0], [roll, 0.4, 0.15, 0.05, flying ? 0.6 : 0],
+      [pitch, -0.3, 0.15, 0.05, flying ? 0.5 : 0], [hdg, 2.5, 0.8, 0.3, flying ? 1.5 : 0],
+      [gx, 0.1, 0.15, 0.05, flying ? 0.4 : 0], [gy, -0.2, 0.15, 0.05, flying ? 0.4 : 0], [flying ? 6 : 0, 0.05, 0.15, 0.05, flying ? 0.3 : 0],
+      [0, 0.012, 0.004, 0.002, flying ? 0.01 : 0], [0, -0.008, 0.004, 0.002, flying ? 0.01 : 0], [-1, 0.015, 0.004, 0.002, flying ? 0.01 : 0]];
+    const vs = [0.1, 100, 100, 100, 100, 10, 10, 10, 1000, 1000, 1000], es = [10, 100, 100, 100, 100, 100, 100, 100, 10000, 10000, 10000];
+    const cal = this.calibrated;
+    const ch = chans.map(([x, bias, sa, sb, ex], k) => {
+      if (k === 4 || k >= 8) return { a: 0, b: 0, bias: 0, resid: 0, sl: 0, sa: 0, sb: 0, st: 0 };   // no compass; INAV sends no accel
+      let a = x + sa * N(), b = x + bias + sb * N();
+      if (k === 4) { a = ((a + 540) % 360) - 180; b = ((b + 540) % 360) - 180; }
+      const sl = Math.hypot(sa, sb, ex);
+      return { a: a * vs[k], b: b * vs[k], bias: cal ? (bias + 0.05 * sl * N()) * es[k] : 0, resid: ((cal ? 0 : bias) + 0.5 * sl * N()) * es[k],
+        sl: sl * es[k], sa: cal ? sa * es[k] : 0, sb: cal ? sb * es[k] : 0, st: cal ? 2 : 1 };
+    });
+    const flags = HFLAG.FC | HFLAG.GY | HFLAG.INAV | (cal ? HFLAG.CAL : 0) | (calibrating ? HFLAG.CALIB : 0);
+    const h = { hops: 0, flags, seq: this.hseq++, uptime: now - this.t0 + 5000, cal: calibrating ? Math.round((now - this.calStart) / 200) : (cal ? 100 : 0),
+      fix: 0, sats: 0, rate: 19 + Math.round(Math.random() * 3), battMv: 0, battCa: 0, tch: [-1, -1, -1], ch };
+    handleLine(`H,${toHex(encodeHealth(h))},${-38 - Math.round(Math.random() * 8)}`);
+  },
+  command(cmd, seq, lat, lon) {
+    setTimeout(() => {   // radio round-trip
+      if (seq === this.lastCmd) return;
+      this.lastCmd = seq; this.ack = seq;
+      if (cmd === CMD.LAUNCH && (this.phase === 0 || this.phase === 3)) {
+        this.origin = this.launch.slice(); this.det = null; ensureWind();
+        this.f = newFlight(CFG.LAUNCH_ALT_M);
+        this.ctx = { wind: windFn(this.origin), groundAlt: CFG.LAUNCH_ALT_M, control: true, target: null, events: [] };
+        this.retarget(); this.predict();
+      }
+      if (cmd === CMD.CUTDOWN && this.f && this.f.attached && FLYING(this.f.phase)) { this.userCut = true; cutDown(this.f, this.ctx, 'cut'); this.ffUntil = performance.now() + 2000; }
+      if (cmd === CMD.RESET) Object.assign(this, { f: null, ctx: null, pred: null, det: null, origin: this.launch.slice() });
+      if (cmd === CMD.CAL_MAG) this.calUntil = performance.now() + 15000;
+      if (cmd === CMD.SET_LAUNCH) { this.launch = [lat, lon]; if (this.phase === 0) this.origin = this.launch.slice(); }
+      if (cmd === CMD.CAL_SENSORS) { this.calStart = performance.now(); this.calibrated = false; this.hAuto = true; }
+    }, 60 + Math.random() * 60);
+  },
+};
+$('btnDemo').onclick = () => demo.timer ? demo.stop() : demo.start();
+$('selSpeed').onchange = e => { demo.speed = +e.target.value; log(`Demo speed ${demo.speed}× real time`); };
+$('chkWind').onchange = e => { S.showWind = e.target.checked; queueWindDraw(); };
+$('chkAltFollow').onchange = e => { S.altFollow = e.target.checked; S.dirty = true; };
+$('chkTimeFollow').onchange = e => { S.timeFollow = e.target.checked; S.dirty = true; };
+$('rngAlt').oninput = e => { S.windAlt = +e.target.value; S.altFollow = false; $('chkAltFollow').checked = false; syncWindUI(); queueWindDraw(); S.dirty = true; };
+$('rngTime').oninput = e => { S.windT = +e.target.value; S.timeFollow = false; $('chkTimeFollow').checked = false; syncWindUI(); queueWindDraw(); S.dirty = true; };
+$('btnCsv').onclick = exportWindCsv;
+$('lgToggle').onclick = () => { const c = $('legend').classList.toggle('collapsed'); $('lgToggle').setAttribute('aria-expanded', !c); };
+if (innerWidth < 1400) { $('legend').classList.add('collapsed'); $('lgToggle').setAttribute('aria-expanded', 'false'); }
+
+// =====================================================================
+//  Boot
+// =====================================================================
+function loadScript(src) { return new Promise((ok, fail) => { const s = document.createElement('script'); s.src = src; s.onload = ok; s.onerror = fail; document.head.appendChild(s); }); }
+(async function boot() {
+  buildInstruments();
+  if (!window.L) {
+    try { await loadScript('https://unpkg.com/leaflet@1.9.4/dist/leaflet.js'); }
+    catch (e) {
+      try {
+        const css = document.createElement('link'); css.rel = 'stylesheet'; css.href = 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css'; document.head.appendChild(css);
+        await loadScript('https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js');
+      } catch (e2) { /* offline: fallback map */ }
+    }
+  }
+  initMap();
+  S.stops = loadStops();
+  S.target = [RECON.target.lat, RECON.target.lon]; S.targetName = RECON.target.name; S.targetGround = RECON.target.ground;
+  ensureWind(); initWindLayer(); moveTargetGraphics(); replan(); syncWindUI(); visHealth(); renderCats(); renderReport();
+  log(`Mission: Sofia → ${S.targetName} with ${S.stops.length} recon stops on the way - "Set target" and "Add stop" change it`);
+  log('Dashboard ready. Connect the ground station, or start demo mode.');
+  if (!('serial' in navigator)) log('This browser has no Web Serial - use Chrome or Edge for the real hardware', 'warn');
+  S.dirty = true;
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

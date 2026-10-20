@@ -1,0 +1,14 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Vision server (debug)",
+      "type": "debugpy",
+      "request": "launch",
+      "python": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
+      "program": "${workspaceFolder}\\vision\\vision_server.py",
+      "cwd": "${workspaceFolder}\\vision",
+      "console": "integratedTerminal"
+    }
+  ]
+}

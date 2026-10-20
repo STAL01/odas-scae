@@ -1,0 +1,79 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Vision: 1. create venv",
+      "type": "process",
+      "command": "py",
+      "args": [
+        "-m",
+        "venv",
+        ".venv"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Vision: 2. install packages into venv",
+      "type": "process",
+      "command": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
+      "args": [
+        "-m",
+        "pip",
+        "install",
+        "-r",
+        "requirements.txt"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}\\vision"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Vision: start server",
+      "type": "process",
+      "command": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
+      "args": [
+        "vision_server.py"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}\\vision"
+      },
+      "isBackground": true,
+      "problemMatcher": [],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      }
+    },
+    {
+      "label": "Vision: start server (faster model)",
+      "type": "process",
+      "command": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
+      "args": [
+        "vision_server.py",
+        "--model",
+        "n"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}\\vision"
+      },
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "Vision: make recon storyboard (real satellite pictures)",
+      "type": "process",
+      "command": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
+      "args": [
+        "make_storyboard.py"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}\\vision"
+      },
+      "problemMatcher": []
+    }
+  ]
+}

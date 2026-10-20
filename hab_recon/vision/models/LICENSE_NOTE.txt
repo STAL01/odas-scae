@@ -1,0 +1,15 @@
+yolo26s-obb.onnx / yolo26n-obb.onnx
+-----------------------------------
+Exported from the Ultralytics YOLO26 OBB models pretrained on DOTA-v1
+(https://github.com/ultralytics/assets/releases), with NMS built in
+(output: 300 x [cx, cy, w, h, score, class, angle] in 1024x1024 input pixels).
+
+- Ultralytics models and weights are licensed AGPL-3.0
+  (https://www.ultralytics.com/license). Using them obliges you to publish
+  the source of the whole project under AGPL-3.0, or to buy an Ultralytics
+  Enterprise licence.
+- DOTA (https://captain-whu.github.io/DOTA/) is an academic dataset.
+
+That is fine for a hackathon demo whose code is published. Before any
+product, retrain a permissively licensed detector (e.g. RF-DETR, D-FINE,
+YOLOX - all Apache-2.0) on imagery you have the rights to.

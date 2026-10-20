@@ -1,0 +1,7 @@
+.venv/
+vision/tile_cache/
+__pycache__/
+*.pyc
+build/
+vision/recon_storyboard.html
+.DS_Store
