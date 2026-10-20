@@ -23,6 +23,11 @@
   - Recon stops (default mission Sofia -> Ruse Airport): numbered places on the map the
     gimbal camera photographs as the balloon passes within 15 km. "Add stop", drag a
     number to move it. "Intel report" tab: one line per picture, CSV and KML export.
+  - Wind data (wind panel, top left): the built-in example field, or the real NOAA GFS
+    0.25° forecast downloaded by the vision server (vision/gfs_wind.py) for the chosen
+    launch time. Plan, demo flight and swarm all fly through the selected data.
+  - "Swarm" tab: 1-100 balloons with their own launch sites/times, lift and wind error,
+    radio mesh between them and to the ground station, camera coverage of the target.
 -->
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <style>
@@ -116,6 +121,14 @@ main{display:grid;grid-template-columns:minmax(0,1fr) 400px;gap:12px;padding:12p
 .wind-panel input[type=range]{width:100%;accent-color:var(--accent);margin:0}
 .wind-panel .wv{color:var(--text);font-family:var(--mono);font-size:12px;font-variant-numeric:tabular-nums}
 .wcur{font-size:11px;color:var(--muted);font-family:var(--mono)} .wcur b{color:var(--text);font-weight:600}
+.wind-panel .wrow.w2{grid-template-columns:52px minmax(0,1fr) auto}
+.wind-panel select,.wind-panel input[type=datetime-local]{background:var(--panel-2);color:var(--text);border:1px solid var(--line-2);border-radius:6px;padding:2px 5px;font:inherit;font-size:12px;min-width:0;width:100%}
+.wnote{font-size:11px;color:var(--muted);line-height:1.4;max-width:430px} .wnote b{color:var(--text);font-weight:600} .wnote.warn{color:#f0c552}
+.sw-canvas{position:absolute;left:0;top:0;pointer-events:none}
+.sw-maptip{position:absolute;z-index:700;pointer-events:none;background:#0f141b;border:1px solid var(--line-2);border-radius:6px;padding:5px 8px;font:12px var(--mono);color:var(--text);white-space:nowrap;transform:translate(12px,-50%)}
+.sw-swarm{width:18px;height:10px;position:relative}
+.sw-swarm:before{content:"";position:absolute;left:0;top:4px;width:18px;border-top:1.5px solid #5ec8f2}
+.sw-swarm:after{content:"";position:absolute;left:5px;top:1px;width:8px;height:8px;border-radius:50%;background:#f2c14e;border:1px solid #0c1016}
 .mis-phase{display:flex;align-items:baseline;gap:10px;margin-bottom:10px;flex-wrap:wrap}
 .mis-phase #misPhase{font-size:18px;font-weight:700}
 .res{display:grid;grid-template-columns:56px 1fr 116px;align-items:center;gap:10px;margin-top:8px;font-size:11px;color:var(--muted)}
@@ -292,6 +305,33 @@ main{display:grid;grid-template-columns:minmax(0,1fr) 400px;gap:12px;padding:12p
 .htable tbody tr.cur td{background:rgba(57,135,229,.14)}
 .no-s{display:inline-block;width:16px;height:16px;border-radius:4px;background:#e9eef3;color:#0c1016;font:700 10px/16px var(--mono);text-align:center;margin-right:6px}
 .left.tab-rep{grid-template-rows:minmax(0,1fr) 300px}
+/* ---------- swarm ---------- */
+.left.tab-swarm{grid-template-rows:minmax(0,1fr) 370px}
+.swarm-pane{display:grid;grid-template-columns:minmax(300px,350px) minmax(0,1fr);gap:16px}
+.sw-form{display:grid;grid-template-columns:62px minmax(0,1fr);gap:6px 8px;align-content:start;font-size:12px;color:var(--text-2);overflow:auto;min-height:0;padding-right:2px}
+.sw-form > label{color:var(--muted);padding-top:5px}
+.sw-form select,.sw-form input[type=number]{background:var(--panel-2);color:var(--text);border:1px solid var(--line-2);border-radius:6px;padding:3px 5px;font:inherit;font-size:12px}
+.sw-form input[type=number]{width:56px;font-family:var(--mono)}
+.sw-form select{width:100%;min-width:0}
+.sw-in{display:flex;align-items:center;gap:5px;flex-wrap:wrap;min-width:0}
+.sw-in input[type=range]{flex:1;min-width:80px;accent-color:var(--accent)}
+.sw-in output{font-family:var(--mono);color:var(--text);min-width:28px;text-align:right;font-weight:600}
+.sw-btns{grid-column:1 / -1;display:flex;gap:6px;flex-wrap:wrap;margin-top:2px}
+.sw-note{grid-column:1 / -1;font-size:11px;color:var(--muted);line-height:1.45}
+.sw-note b{color:var(--text)} .sw-note.warn{color:#f0c552}
+.sw-res{display:grid;grid-template-rows:auto auto minmax(0,1fr);gap:8px;min-height:0;min-width:0}
+.sw-time{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px}
+.sw-time input[type=range]{flex:1;min-width:140px;accent-color:var(--accent)}
+.sw-time .wv{font-family:var(--mono);color:var(--text);min-width:120px}
+.sw-stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px 14px}
+.sw-stats .stat .v{font-size:15px}
+.sw-lower{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.15fr);gap:12px;min-height:0}
+.sw-chart{position:relative;min-height:0}
+#swChart{position:absolute;inset:0;width:100%;height:100%}
+.sw-table{min-height:0}
+.sw-table td.l{text-align:left}
+.sw-dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px;border:1px solid #0c1016}
+.sw-empty{display:grid;place-items:center;color:var(--muted);font-size:12px;text-align:center;line-height:1.6;padding:12px}
 @media (max-width:1100px){
   html,body{height:auto}
   body{display:block;overflow:auto}
@@ -301,6 +341,11 @@ main{display:grid;grid-template-columns:minmax(0,1fr) 400px;gap:12px;padding:12p
   .left.tab-wind{grid-template-rows:60vh 300px}
   .left.tab-cam{grid-template-rows:60vh auto}
   .left.tab-rep{grid-template-rows:60vh 340px}
+  .left.tab-swarm{grid-template-rows:60vh auto}
+  .swarm-pane{grid-template-columns:1fr}
+  .sw-lower{grid-template-columns:1fr}
+  .sw-chart{height:180px}
+  .sw-stats{grid-template-columns:repeat(2,minmax(0,1fr))}
   .cam-pane{grid-template-columns:1fr}
   .cam-view{height:320px}
   .health-pane{grid-template-columns:1fr}
@@ -329,7 +374,7 @@ main{display:grid;grid-template-columns:minmax(0,1fr) 400px;gap:12px;padding:12p
       <path d="M11 17.5 L14 24 M21 17.5 L18 24" stroke="#e9eef3" stroke-width="1.6"/>
       <rect x="13" y="24" width="6" height="5" rx="1" fill="#3987e5"/>
     </svg>
-    <div><div class="title">HAB-RECON <span class="badge" title="Version 3.1: recon mission Sofia → Ruse Airport · compass from the GY-91 only" style="vertical-align:2px">v3.1</span></div><div class="sub">Ground station · high-altitude balloon reconnaissance</div></div>
+    <div><div class="title">HAB-RECON <span class="badge" title="Version 3.2: real NOAA GFS wind · swarm simulation of 1-100 balloons" style="vertical-align:2px">v3.2</span></div><div class="sub">Ground station · high-altitude balloon reconnaissance</div></div>
   </div>
   <div class="status">
     <div class="pill bad" id="pillLink"><span class="dot"></span><span id="linkText">NO LINK</span></div>
@@ -355,8 +400,12 @@ main{display:grid;grid-template-columns:minmax(0,1fr) 400px;gap:12px;padding:12p
           <span class="wv" id="vWindAlt">11.0 km</span><label class="chk"><input type="checkbox" id="chkAltFollow" checked> balloon</label></div>
         <div class="wrow"><span>Time</span><input type="range" id="rngTime" min="0" max="43200" step="300" value="0" aria-label="Wind time after launch">
           <span class="wv" id="vWindT">T+0:00</span><label class="chk"><input type="checkbox" id="chkTimeFollow" checked> flight</label></div>
+        <div class="wrow w2"><span>Data</span><select id="selWindSrc" aria-label="Wind data source"><option value="example">Example field (built-in)</option><option value="gfs">GFS forecast · NOAA</option></select><span></span></div>
+        <div class="wrow w2"><span>Launch</span><input type="datetime-local" id="inLaunch" step="3600" aria-label="Launch time, your local time"><span class="wv" id="vLaunchUtc"></span></div>
+        <div class="wnote" id="windNote"></div>
         <div class="wcur" id="windCur">Point at the map to read the wind there</div>
       </div>
+      <div class="sw-maptip" id="swMapTip" hidden></div>
       <div class="map-tools">
         <button id="btnSetLaunch" class="btn small">Set launch site</button>
         <button id="btnSetTarget" class="btn small">Set target</button>
@@ -380,6 +429,7 @@ main{display:grid;grid-template-columns:minmax(0,1fr) 400px;gap:12px;padding:12p
         <span><i class="sw-arrow">→</i>Wind · length = speed</span>
         <span><i class="sw-free"></i>No altitude control</span>
         <span><i class="sw-stop">1</i>Recon stop · drag to move</span>
+        <span><i class="sw-swarm"></i>Swarm balloon · radio link</span>
         </div>
       </div>
     </div>
@@ -391,6 +441,7 @@ main{display:grid;grid-template-columns:minmax(0,1fr) 400px;gap:12px;padding:12p
           <button class="tab" id="tabCam" role="tab" aria-selected="false">Camera · recon</button>
           <button class="tab" id="tabRep" role="tab" aria-selected="false">Intel report</button>
           <button class="tab" id="tabHealth" role="tab" aria-selected="false" title="GY-91 vs F405">Sensor error</button>
+          <button class="tab" id="tabSwarm" role="tab" aria-selected="false" title="1-100 balloons through the same wind">Swarm</button>
         </div>
         <span class="hint" id="paneHint">grey dashed = mission plan · amber band = jet stream</span>
       </div>
@@ -420,6 +471,40 @@ main{display:grid;grid-template-columns:minmax(0,1fr) 400px;gap:12px;padding:12p
           <thead><tr><th>Time</th><th class="l">Stop / picture</th><th class="l">Findings</th><th>Objects</th><th>Best</th><th>Range</th><th>m/px</th></tr></thead>
           <tbody id="repBody"></tbody>
         </table></div>
+      </div>
+      <div class="pane swarm-pane" id="paneSwarm" hidden>
+        <form class="sw-form" id="swForm" onsubmit="return false" aria-label="Swarm settings">
+          <label for="swN">Balloons</label><div class="sw-in"><input type="range" id="swN" min="1" max="100" value="20"><output id="swNv" for="swN">20</output></div>
+          <label for="swMode">Behaviour</label><select id="swMode">
+            <option value="float">Float in an altitude band, then cut down</option>
+            <option value="mission">Jet-stream mission to the target</option>
+            <option value="free">Free flight: climb until it bursts</option></select>
+          <label class="f-float" for="swZlo">Float</label><div class="sw-in f-float"><input type="number" id="swZlo" min="3" max="25" step="0.5" value="12">–<input type="number" id="swZhi" min="3" max="25" step="0.5" value="20"> km, for <input type="number" id="swFloatH" min="0.5" max="120" step="0.5" value="6"> h</div>
+          <label for="swLaunch">Launch</label><select id="swLaunch">
+            <option value="stagger">One site, one after another</option>
+            <option value="line">Sites along a line (e.g. the front)</option>
+            <option value="area">Random sites in a circle</option></select>
+          <label for="swEvery">Every</label><div class="sw-in"><input type="number" id="swEvery" min="0" max="720" step="5" value="10"> min
+            <span class="sw-in f-line">· line <input type="number" id="swLineKm" min="1" max="1000" step="10" value="100"> km at <input type="number" id="swLineBrg" min="0" max="359" step="5" value="0">°</span>
+            <span class="sw-in f-area">· radius <input type="number" id="swAreaKm" min="1" max="500" step="5" value="30"> km</span></div>
+          <label for="swLift">Spread</label><div class="sw-in">lift ±<input type="number" id="swLift" min="0" max="50" step="1" value="5">% · wind error <input type="number" id="swErr" min="0" max="15" step="0.5" value="1.5"> m/s</div>
+          <label for="swRadio">Radio</label><div class="sw-in"><input type="number" id="swRadio" min="1" max="1000" step="10" value="150"> km range, line of sight</div>
+          <label for="swHours">Run for</label><div class="sw-in"><input type="number" id="swHours" min="1" max="120" step="1" value="24"> h · random seed <input type="number" id="swSeed" min="1" max="9999" step="1" value="1"></div>
+          <div class="sw-btns"><button class="btn small primary" id="swRun">Run swarm</button><button class="btn small" id="swClear">Clear</button>
+            <button class="btn small" id="swCsv" title="Every balloon every 5 minutes">CSV</button><button class="btn small" id="swKml" title="Opens in Google Earth: one 3-D track per balloon">KML</button></div>
+          <div class="sw-note" id="swNote"></div>
+        </form>
+        <div class="sw-res">
+          <div class="sw-time"><button class="btn small" id="swPlay" title="Play: 1 hour per second">▶</button><input type="range" id="swT" min="0" max="86400" step="60" value="0" aria-label="Swarm time"><span class="wv" id="swTv">—</span>
+            <label class="chk"><input type="checkbox" id="swShowTracks" checked> tracks</label><label class="chk"><input type="checkbox" id="swShowLinks" checked> radio</label><label class="chk" title="Where the gimbal camera can take pictures: within 15 km and at least 6 km up"><input type="checkbox" id="swShowCov"> camera coverage</label></div>
+          <div class="sw-stats" id="swStats"></div>
+          <div class="sw-lower">
+            <div class="sw-chart"><canvas id="swChart" aria-label="Airborne balloons, balloons linked to the ground station and balloons watching the target over time"></canvas><div id="swTip" class="tip" hidden></div></div>
+            <div class="htable sw-table"><table>
+              <thead><tr><th>#</th><th>Launch</th><th title="Riding altitude (float or jet stream), else the highest point">Altitude</th><th>Flight</th><th style="text-align:left">Status</th><th title="Distance and direction from its launch site">Lands</th><th title="Closest approach to the target · minutes the camera could watch it">Target</th></tr></thead>
+              <tbody id="swBody"></tbody></table></div>
+          </div>
+        </div>
       </div>
       <div class="pane chartbox" id="paneWind" hidden><canvas id="windChart" aria-label="Wind speed and wind toward the target versus altitude"></canvas><div id="windTip" class="tip" hidden></div></div>
       <div class="pane health-pane" id="paneHealth" hidden>
@@ -505,7 +590,7 @@ main{display:grid;grid-template-columns:minmax(0,1fr) 400px;gap:12px;padding:12p
       <div class="card-h"><span>Attitude · fused</span><span class="hint" id="magNote"></span></div>
       <div class="att">
         <figure><svg id="adi" width="128" height="128" viewBox="-64 -64 128 128" role="img" aria-label="Artificial horizon"></svg><figcaption>Horizon</figcaption></figure>
-        <figure><svg id="compass" width="128" height="128" viewBox="-64 -64 128 128" role="img" aria-label="Compass"></svg><figcaption>Heading (magnetic)</figcaption></figure>
+        <figure><svg id="compass" width="128" height="128" viewBox="-64 -64 128 128" role="img" aria-label="Compass"></svg><figcaption>Heading (true)</figcaption></figure>
       </div>
       <div class="grid4">
         <div class="stat"><div class="k">Roll</div><div class="v" id="vRoll">—</div></div>
@@ -784,7 +869,7 @@ WIND.build = function (origin, ref, groundAlt) {
   this.buildMs = performance.now() - t0;
 };
 // quadrilinear interpolation; n/e in metres from the grid origin (launch site), z m MSL, t s after launch
-WIND.sample = function (n, e, z, t, out) {
+WIND.sampleExample = function (n, e, z, t, out) {
   const { NX, NY, NZ, NT, DX, DZ, DT, data } = this;
   const fx = Math.min(NX - 1.0001, Math.max(0, e / DX + this.half)), fy = Math.min(NY - 1.0001, Math.max(0, n / DX + this.half));
   const fz = Math.min(NZ - 1.0001, Math.max(0, z / DZ)), ft = Math.min(NT - 1.0001, Math.max(0, t / DT));
@@ -810,6 +895,99 @@ WIND.sample = function (n, e, z, t, out) {
 };
 
 // ---------------------------------------------------------------------
+//  Real wind: NOAA GFS 0.25° forecast from the vision server (vision/gfs_wind.py)
+//  Grid [t][lat][lon][level][gh, u, v, T] on 28 pressure levels (1000-10 hPa).
+//  Height interpolation uses each column's own geopotential height, pressure
+//  is interpolated in log p, so density comes from the forecast, not the ISA.
+// ---------------------------------------------------------------------
+const GFS = { head: null, data: null, ter: null, file: '', note: '', outside: false, timeOut: false };
+function gfsLoad(buf, file) {
+  const u8 = new Uint8Array(buf), dv = new DataView(buf);
+  if (String.fromCharCode(u8[0], u8[1], u8[2], u8[3]) !== 'HABW') throw new Error('not a HAB-RECON wind file');
+  const hl = dv.getUint32(8, true), h = JSON.parse(new TextDecoder().decode(u8.subarray(12, 12 + hl)));
+  const { nt, ny, nx, nk } = h, off = 12 + hl;
+  const ter = new Int16Array(buf, off, ny * nx), raw = new Int16Array(buf, off + ny * nx * 2, nt * ny * nx * nk * 4);
+  const d = new Float32Array(raw.length), sc = h.scale, of = h.offset;
+  for (let i = 0; i < raw.length; i++) { const j = i & 3; d[i] = raw[i] * sc[j] + of[j]; }
+  Object.assign(GFS, { head: h, data: d, ter: Float32Array.from(ter), file, NT: nt, NY: ny, NX: nx, NK: nk,
+    lat0: h.lat0, lon0: h.lon0, dlat: h.dlat, dlon: h.dlon, t0: h.t0, dt: h.dt, t1: h.t0 + (nt - 1) * h.dt,
+    lat1: h.lat0 + (ny - 1) * h.dlat, lnp: Float64Array.from(h.levels_hpa, p => Math.log(p * 100)) });
+  return GFS;
+}
+const gfsFx = lon => (((lon - GFS.lon0) % 360) + 360) % 360 / GFS.dlon;
+// column index clamped to the grid: west of the grid wraps to just under 360°, so pick the nearer edge
+const gfsClampX = fx => fx <= GFS.NX - 1.0001 ? fx : (fx - (GFS.NX - 1) < 360 / GFS.dlon - fx ? GFS.NX - 1.0001 : 0);
+function gfsInside(lat, lon) { return lat >= GFS.lat0 && lat <= GFS.lat1 && gfsFx(lon) <= GFS.NX - 1; }
+function gfsTerrain(lat, lon) {
+  const { NX, NY, ter } = GFS;
+  const fy = Math.min(NY - 1.0001, Math.max(0, (lat - GFS.lat0) / GFS.dlat)), fx = gfsClampX(gfsFx(lon));
+  const iy = fy | 0, ix = fx | 0, ay = fy - iy, ax = fx - ix, i = iy * NX + ix;
+  return Math.max(0, (1 - ay) * ((1 - ax) * ter[i] + ax * ter[i + 1]) + ay * ((1 - ax) * ter[i + NX] + ax * ter[i + NX + 1]));
+}
+const _acc = [0, 0, 0, 0];
+// one column at height z, weight w, added into _acc = [u_east, v_north, T, ln p]
+function gfsColumn(base, z, w) {
+  const d = GFS.data, NK = GFS.NK, lnp = GFS.lnp;
+  const g0 = d[base], gN = d[base + (NK - 1) * 4];
+  let k, f, lp;
+  if (z <= g0) { k = 0; f = 0; }
+  else if (z >= gN) { k = NK - 2; f = 1; }
+  else {
+    let lo = 0, hi = NK - 1;
+    while (hi - lo > 1) { const m = (lo + hi) >> 1; if (d[base + m * 4] <= z) lo = m; else hi = m; }
+    k = lo; const ga = d[base + k * 4]; f = (z - ga) / (d[base + k * 4 + 4] - ga);
+  }
+  const a = base + k * 4, b = a + 4;
+  const T = d[a + 3] + f * (d[b + 3] - d[a + 3]);
+  if (z <= g0) lp = lnp[0] - (z - g0) * G0 / (R_AIR * T);                  // below 1000 hPa: hydrostatic
+  else if (z >= gN) lp = lnp[NK - 1] - (z - gN) * G0 / (R_AIR * T);       // above 10 hPa
+  else lp = lnp[k] + f * (lnp[k + 1] - lnp[k]);
+  _acc[0] += w * (d[a + 1] + f * (d[b + 1] - d[a + 1]));
+  _acc[1] += w * (d[a + 2] + f * (d[b + 2] - d[a + 2]));
+  _acc[2] += w * T; _acc[3] += w * lp;
+}
+// wind at lat/lon/z (m MSL) and time (epoch s): out = [u_north, u_east, w_up, T K, p Pa]
+function gfsSample(lat, lon, z, epoch, out) {
+  const { NX, NY, NT, NK } = GFS;
+  let fy = (lat - GFS.lat0) / GFS.dlat, fx = gfsFx(lon), ft = (epoch - GFS.t0) / GFS.dt;
+  GFS.outside = fy < 0 || fy > NY - 1 || fx > NX - 1;
+  GFS.timeOut = ft < 0 || ft > NT - 1;
+  fy = Math.min(NY - 1.0001, Math.max(0, fy)); fx = gfsClampX(fx); ft = Math.min(Math.max(0, NT - 1.0001), Math.max(0, ft));
+  const ix = fx | 0, iy = fy | 0, it = ft | 0, ax = fx - ix, ay = fy - iy, at = ft - it;
+  _acc[0] = _acc[1] = _acc[2] = _acc[3] = 0;
+  for (let ct = 0; ct < 2; ct++) {
+    const wt = ct ? at : 1 - at; if (!wt) continue;
+    for (let cy = 0; cy < 2; cy++) {
+      const wy = wt * (cy ? ay : 1 - ay); if (!wy) continue;
+      const row = ((it + ct) * NY + iy + cy) * NX + ix;
+      if (1 - ax) gfsColumn(row * NK * 4, z, wy * (1 - ax));
+      if (ax) gfsColumn((row + 1) * NK * 4, z, wy * ax);
+    }
+  }
+  out = out || [0, 0, 0, 0, 0];
+  out[0] = _acc[1]; out[1] = _acc[0]; out[2] = 0; out[3] = _acc[2]; out[4] = Math.exp(_acc[3]);
+  return out;
+}
+const _atm = { T: 288.15, p: 101325, rho: 1.225 };
+// atmosphere from the last forecast sample (u[3] = T, u[4] = p)
+function realAtm(u) { _atm.T = u[3]; _atm.p = u[4]; _atm.rho = u[4] / (R_AIR * u[3]); return _atm; }
+
+// one entry point for everyone: the example field, or the GFS forecast when it is loaded
+WIND.real = false;                   // true while the GFS forecast is in use
+WIND.t0 = 0;                         // launch time (epoch s): t = 0 of every flight
+WIND.sample = function (n, e, z, t, out) {
+  if (!this.real) return this.sampleExample(n, e, z, t, out);
+  const o = this.origin, lat = o[0] + n / R_E / D2R, lon = o[1] + e / (R_E * Math.cos(o[0] * D2R)) / D2R;
+  return gfsSample(lat, lon, z, this.t0 + t, out);
+};
+// is (lat, lon) inside the wind data? (the example field covers ±300 km around its origin)
+function windInside(lat, lon) {
+  if (WIND.real) return gfsInside(lat, lon);
+  const [n, e] = llToNE(WIND.origin, lat, lon), lim = WIND.half * WIND.DX;
+  return Math.abs(n) <= lim && Math.abs(e) <= lim;
+}
+
+// ---------------------------------------------------------------------
 //  Balloon
 // ---------------------------------------------------------------------
 function newFlight(groundAlt) {
@@ -827,9 +1005,11 @@ const freeLift = f => f.attached ? LIFT_PER_KG_HE * f.mHe - (BAL.mBalloon + BAL.
 // free lift (kg) that gives vertical speed w in still air
 const liftFor = (w, atm, A) => Math.sign(w) * 0.5 * atm.rho * BAL.cd * A * w * w / G0;
 
-const _w = [0, 0, 0];
+const _w = [0, 0, 0, 0, 0];
 function physicsStep(f, ctx, dt) {
-  const atm = isa(f.z), u = ctx.wind(f.n, f.e, f.z, f.t, _w);
+  // wind (and, with the GFS forecast, temperature and pressure) at the balloon; f is passed so the
+  // swarm can look the wind up by the balloon's own latitude/longitude
+  const u = ctx.wind(f.n, f.e, f.z, f.t, _w, f), atm = ctx.atm ? ctx.atm(u, f) : isa(f.z);
   let m, V, A, cd, ma;
   if (f.attached) {
     const g = geomOf(f, atm); V = g.V; A = g.A; cd = BAL.cd;
@@ -1338,6 +1518,7 @@ function ingest(p, rssi) {
 // =====================================================================
 function setText(id, html) { const e = $(id); if (e.innerHTML !== html) e.innerHTML = html; }
 function render() {
+  if (S.tab === 'swarm') drawSwChart();
   const p = S.last;
   if (p) {
     setText('vAlt', nf0.format(p.alt));
@@ -1575,17 +1756,19 @@ $('residChart').addEventListener('mouseleave', () => { residHover = null; drawRe
 $('hBody').addEventListener('click', e => { const tr = e.target.closest('tr'); if (!tr) return; S.sel = +tr.dataset.k; $('hBody').dataset.html = ''; S.dirty = true; });
 function setTab(t) {
   S.tab = t;
-  [['alt', 'tabAlt', 'paneAlt'], ['wind', 'tabWind', 'paneWind'], ['cam', 'tabCam', 'paneCam'], ['rep', 'tabRep', 'paneRep'], ['health', 'tabHealth', 'paneHealth']].forEach(([k, tb, pn]) => {
+  [['alt', 'tabAlt', 'paneAlt'], ['wind', 'tabWind', 'paneWind'], ['cam', 'tabCam', 'paneCam'], ['rep', 'tabRep', 'paneRep'], ['health', 'tabHealth', 'paneHealth'], ['swarm', 'tabSwarm', 'paneSwarm']].forEach(([k, tb, pn]) => {
     $(tb).classList.toggle('on', t === k); $(tb).setAttribute('aria-selected', t === k); $(pn).hidden = t !== k;
   });
   document.querySelector('.left').classList.toggle('tab-health', t === 'health');
   document.querySelector('.left').classList.toggle('tab-wind', t === 'wind');
   document.querySelector('.left').classList.toggle('tab-cam', t === 'cam');
   document.querySelector('.left').classList.toggle('tab-rep', t === 'rep');
+  document.querySelector('.left').classList.toggle('tab-swarm', t === 'swarm');
   setText('paneHint', t === 'alt' ? 'grey dashed = mission plan · amber band = jet stream · squares = recon pictures'
     : t === 'wind' ? 'over the balloon (or launch site) at the wind-panel time · arrows = where it blows'
     : t === 'cam' ? 'picture made from satellite imagery · scroll to zoom · click an object to see it on the map'
     : t === 'rep' ? 'one line per picture · click a line to open the picture'
+    : t === 'swarm' ? 'every balloon through the same wind · drag the time · click a row to follow a balloon'
     : 'GY-91 vs F405 · click a row to plot its error · band = ±3σ, red = fault (6σ)');
   S.dirty = true;
 }
@@ -1594,6 +1777,7 @@ $('tabWind').onclick = () => setTab('wind');
 $('tabCam').onclick = () => setTab('cam');
 $('tabRep').onclick = () => setTab('rep');
 $('tabHealth').onclick = () => setTab('health');
+$('tabSwarm').onclick = () => { setTab('swarm'); setTimeout(() => { if (map) map.invalidateSize(); swDraw(); drawSwChart(); }, 50); };
 $('cCalSensors').onclick = () => sendCommand(CMD.CAL_SENSORS);
 
 // =====================================================================
@@ -1640,9 +1824,10 @@ let replanTimer = null;
 function scheduleReplan() { clearTimeout(replanTimer); replanTimer = setTimeout(replan, 120); }
 function replan() {
   ensureWind();
+  if (S.windSrc === 'gfs' && WIND.real && !GFS.loading && !gfsCoversLaunch()) { log('Launch site is near the edge of the GFS area - loading the forecast around it', 'warn'); gfsRequest(); }
   const o = S.launch.slice(), wind = windFn(o), toLL = (n, e) => offsetLatLon(o[0], o[1], n, e);
   const tgt = S.target ? llToNE(o, S.target[0], S.target[1]) : null;
-  const ctx = { wind, groundAlt: S.groundAlt, control: true, target: tgt };
+  const ctx = { wind, groundAlt: S.groundAlt, control: true, target: tgt, atm: WIND.real ? realAtm : null };
   const f0 = newFlight(S.groundAlt);
   const plan = simulate(f0, Object.assign({}, ctx), 2, 30);
   const free = simulate(f0, Object.assign({}, ctx, { control: false }), 2, 60);
@@ -1786,14 +1971,27 @@ function drawWindLayer() {
   const g = c.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, size.x, size.y);
   if (!S.showWind || !WIND.data) return;
   const o = WIND.origin, z = S.windAlt, t = S.windT;
-  const p0 = map.latLngToContainerPoint(o), p1 = map.latLngToContainerPoint(offsetLatLon(o[0], o[1], 0, WIND.DX));
-  const sp = Math.hypot(p1.x - p0.x, p1.y - p0.y), stride = Math.max(1, Math.ceil(30 / sp)), cell = sp * stride;
   const nodes = [];
-  for (let iy = 0; iy < WIND.NY; iy += stride) for (let ix = 0; ix < WIND.NX; ix += stride) {
-    const n = (iy - WIND.half) * WIND.DX, e = (ix - WIND.half) * WIND.DX;
-    const pt = map.latLngToContainerPoint(offsetLatLon(o[0], o[1], n, e));
-    if (pt.x < -cell || pt.y < -cell || pt.x > size.x + cell || pt.y > size.y + cell) continue;
-    nodes.push([pt, WIND.sample(n, e, z, t)]);
+  let cell;
+  if (WIND.real) {                       // GFS: arrows on the forecast's own grid points
+    const pA = map.latLngToContainerPoint([GFS.lat0, GFS.lon0]), pB = map.latLngToContainerPoint([GFS.lat0, GFS.lon0 + GFS.dlon]);
+    const sp = Math.hypot(pB.x - pA.x, pB.y - pA.y), stride = Math.max(1, Math.ceil(30 / sp)), ep = WIND.t0 + t;
+    cell = sp * stride;
+    for (let iy = 0; iy < GFS.NY; iy += stride) for (let ix = 0; ix < GFS.NX; ix += stride) {
+      const lat = GFS.lat0 + iy * GFS.dlat, lon = GFS.lon0 + ix * GFS.dlon, pt = map.latLngToContainerPoint([lat, lon > 180 ? lon - 360 : lon]);
+      if (pt.x < -cell || pt.y < -cell || pt.x > size.x + cell || pt.y > size.y + cell) continue;
+      nodes.push([pt, gfsSample(lat, lon, z, ep, [0, 0, 0, 0, 0])]);
+    }
+  } else {
+    const p0 = map.latLngToContainerPoint(o), p1 = map.latLngToContainerPoint(offsetLatLon(o[0], o[1], 0, WIND.DX));
+    const sp = Math.hypot(p1.x - p0.x, p1.y - p0.y), stride = Math.max(1, Math.ceil(30 / sp));
+    cell = sp * stride;
+    for (let iy = 0; iy < WIND.NY; iy += stride) for (let ix = 0; ix < WIND.NX; ix += stride) {
+      const n = (iy - WIND.half) * WIND.DX, e = (ix - WIND.half) * WIND.DX;
+      const pt = map.latLngToContainerPoint(offsetLatLon(o[0], o[1], n, e));
+      if (pt.x < -cell || pt.y < -cell || pt.x > size.x + cell || pt.y > size.y + cell) continue;
+      nodes.push([pt, WIND.sample(n, e, z, t)]);
+    }
   }
   // rising (red) and sinking (blue) air
   nodes.forEach(([pt, u]) => {
@@ -1828,12 +2026,13 @@ function syncWindUI() {
 function updateWindFollow() {
   const p = S.last, live = p && S.lastRx && FLYING(p.phase);
   let ch = false;
+  const swOn = !live && S.tab === 'swarm' && SW.res;
   if (S.altFollow) {
-    const z = live ? p.alt : (S.plan ? S.plan.ride : 11000);
+    const z = live ? p.alt : swOn && SW.sel != null ? swAltAt(SW.sel, SW.t) : (S.plan ? S.plan.ride : 11000);
     if (Math.abs(z - S.windAlt) > 100) { S.windAlt = Math.round(z / 50) * 50; ch = true; }
   }
   if (S.timeFollow) {
-    const t = p && S.lastRx && p.phase !== 0 ? Math.min(p.met, 43200) : 0;
+    const t = p && S.lastRx && p.phase !== 0 ? Math.min(p.met, +$('rngTime').max) : swOn ? SW.t : 0;
     if (Math.abs(t - S.windT) > 60 || (t === 0 && S.windT !== 0)) { S.windT = t; ch = true; }
   }
   if (ch) { syncWindUI(); queueWindDraw(); }
@@ -1853,6 +2052,98 @@ function exportWindCsv() {
   setTimeout(() => URL.revokeObjectURL(a.href), 4000);
   log(`Wind matrix exported: ${rows.length - 1} points (all altitudes) at ${fmtT(t)}`);
 }
+
+// ---------------------------------------------------------------------
+//  Wind data source: the built-in example field, or the NOAA GFS forecast
+//  that the vision server downloads (vision/gfs_wind.py) for the launch time
+// ---------------------------------------------------------------------
+const WSRC_KEY = 'habrecon.wind.v1';
+const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+S.windSrc = 'example';
+const fmtUtc = ep => { const d = new Date(ep * 1000); return `${d.getUTCDate()} ${MON[d.getUTCMonth()]} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())} UTC`; };
+const fmtLocal = ep => { const d = new Date(ep * 1000); return `${d.getDate()} ${MON[d.getMonth()]} ${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+function launchEpochDefault() { const d = new Date(); d.setMinutes(0, 0, 0); d.setHours(d.getHours() + 1); return Math.floor(d.getTime() / 1000); }
+function toLocalInput(ep) { const d = new Date(ep * 1000); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`; }
+function setWindNote(html, warn) { const n = $('windNote'); n.innerHTML = html; n.classList.toggle('warn', !!warn); }
+const gfsCoversLaunch = () => WIND.real && S.launch[0] > GFS.lat0 + 1 && S.launch[0] < GFS.lat1 - 1 && gfsFx(S.launch[1]) > 1 / GFS.dlon && gfsFx(S.launch[1]) < GFS.NX - 1 - 1 / GFS.dlon;
+function syncWindSrcUI() {
+  $('selWindSrc').value = S.windSrc;
+  $('inLaunch').value = toLocalInput(WIND.t0);
+  setText('vLaunchUtc', fmtUtc(WIND.t0));
+  $('rngTime').max = WIND.real ? Math.max(3600, Math.min(GFS.t1 - WIND.t0, 120 * 3600)) : 43200;
+  if (S.windSrc === 'example') setWindNote('Built-in <b>example</b> wind, not real weather. Choose <b>GFS forecast</b> for NOAA\'s forecast.');
+  else if (WIND.real) {
+    const late = WIND.t0 < GFS.t0 || WIND.t0 > GFS.t1 - 3600;
+    setWindNote(`<b>NOAA GFS</b> run ${GFS.head.run.replace('T', ' ')} · ${GFS.NY}×${GFS.NX} points · 28 levels to 31 km · ${fmtUtc(GFS.t0)} – ${fmtUtc(GFS.t1)}` +
+      (late ? '<br>The launch time is outside this forecast.' : '') + (GFS.note ? `<br>${esc(GFS.note)}` : ''), late || !!GFS.note);
+  }
+  swNoteIdle();
+}
+let gfsToken = 0;
+async function gfsRequest() {
+  const tok = ++gfsToken;
+  GFS.loading = tok;
+  try { await gfsFetch(tok); } finally { if (GFS.loading === tok) GFS.loading = 0; }
+}
+async function gfsFetch(tok) {
+  if (!VIS.online) await visHealth();
+  if (tok !== gfsToken) return;
+  if (!VIS.online) {
+    setWindNote('The GFS forecast comes through the vision server: start it (<b>vision\\start_vision.bat</b>, or <b>vision_server.py</b> on a Mac), then choose GFS again.', true);
+    log('GFS forecast needs the vision server - using the example wind', 'warn');
+    S.windSrc = 'example'; WIND.real = false; $('selWindSrc').value = 'example';
+    return;
+  }
+  const hours = Math.max(48, Math.min(120, Math.ceil(+$('swHours').value || 24) + 6));
+  const q = `lat=${S.launch[0].toFixed(4)}&lon=${S.launch[1].toFixed(4)}&start=${WIND.t0}&hours=${hours}`;
+  setWindNote('Asking NOAA for the newest GFS forecast…');
+  for (let k = 0; k < 900; k++) {
+    if (tok !== gfsToken) return;
+    let j;
+    try { j = await (await fetch(`${VIS.base}/api/wind?${q}`, { cache: 'no-store' })).json(); }
+    catch (e) { setWindNote('The vision server stopped while loading the GFS forecast.', true); return; }
+    if (j.state === 'ready') {
+      try {
+        const buf = await (await fetch(`${VIS.base}/api/wind.bin?file=${encodeURIComponent(j.file)}`, { cache: 'no-store' })).arrayBuffer();
+        if (tok !== gfsToken) return;
+        gfsLoad(buf, j.file);
+        GFS.note = j.note || '';
+        WIND.real = true;
+        if (WIND.t0 < GFS.t0 || WIND.t0 > GFS.t1 - 6 * 3600) {      // e.g. an older cached forecast while offline
+          WIND.t0 = Math.min(Math.max(WIND.t0, GFS.t0), GFS.t1 - 6 * 3600);
+          WIND.t0 -= WIND.t0 % 3600;
+          log(`Launch time moved to ${fmtLocal(WIND.t0)} - the forecast covers ${fmtUtc(GFS.t0)} – ${fmtUtc(GFS.t1)}`, 'warn');
+        }
+        log(`Wind: NOAA GFS ${GFS.head.run.replace('T', ' ')} run loaded · ${(buf.byteLength / 1e6).toFixed(1)} MB · ${GFS.NY}×${GFS.NX} points × 28 levels × ${GFS.NT} steps`, 'good');
+        if (GFS.note) log(`GFS: ${GFS.note}`, 'warn');
+        syncWindSrcUI(); replan(); queueWindDraw(); S.dirty = true;
+      } catch (e) { setWindNote(`Could not read the GFS file: ${esc(e.message)}`, true); }
+      return;
+    }
+    if (j.state === 'error') { setWindNote(esc(j.msg), true); log('GFS: ' + j.msg, 'bad'); return; }
+    setWindNote(`Downloading NOAA GFS · ${esc(j.msg || '')}${j.total ? ` · ${j.done} of ${j.total} files` : ''}…`);
+    await new Promise(r => setTimeout(r, 1000));
+  }
+}
+function setWindSrc(src) {
+  S.windSrc = src;
+  try { localStorage.setItem(WSRC_KEY, JSON.stringify({ src })); } catch (e) {}
+  if (src === 'example') {
+    gfsToken++; WIND.real = false;
+    syncWindSrcUI(); replan(); queueWindDraw(); S.dirty = true;
+    log('Wind: built-in example field');
+  } else gfsRequest();
+}
+$('selWindSrc').onchange = e => setWindSrc(e.target.value);
+$('inLaunch').onchange = e => {
+  const ep = Math.floor(new Date(e.target.value).getTime() / 1000);
+  if (!isFinite(ep)) return;
+  WIND.t0 = ep - (ep % 60);
+  syncWindSrcUI();
+  log(`Launch time ${fmtLocal(WIND.t0)} (${fmtUtc(WIND.t0)})`);
+  if (S.windSrc === 'gfs' && (!WIND.real || WIND.t0 < GFS.t0 || WIND.t0 > GFS.t1 - 6 * 3600)) gfsRequest();
+  else { replan(); queueWindDraw(); }
+};
 
 // ---------------------------------------------------------------------
 //  Wind profile chart: speed and the part toward the target vs altitude
@@ -2552,6 +2843,7 @@ function onMapPick(ll) {
 }
 $('btnFit').onclick = () => {
   if (!map) return;
+  if (S.tab === 'swarm' && SW.res) { swFit(); return; }
   const pts = [S.launch, ...S.track, ...(S.pred ? S.pred.pts : []), ...(S.plan ? S.plan.pts.map(q => q.ll) : []), ...(S.target ? [S.target] : []), ...S.stops.map(st => [st.lat, st.lon])];
   $('chkFollow').checked = false;
   if (pts.length > 1) map.fitBounds(L.latLngBounds(pts).pad(0.15)); else map.setView(S.launch, 9);
@@ -2612,6 +2904,551 @@ async function disconnectSerial(silent) {
   S.dirty = true;
 }
 $('btnConnect').onclick = () => serial.port ? disconnectSerial(false) : connectSerial();
+
+// =====================================================================
+//  Swarm - 1 to 100 balloons through the same wind (example field or the
+//  GFS forecast). Every balloon has its own launch site and time, lift and a
+//  slowly changing wind error (forecast uncertainty), and flies the same
+//  physics and controllers as the single-balloon plan. After the run: the
+//  radio mesh between the balloons and to the ground station, and where the
+//  gimbal camera could take pictures (within 15 km, at least 6 km up).
+// =====================================================================
+const SW = { res: null, running: false, t: 0, play: null, sel: null };
+const SW_KEY = 'habrecon.swarm.v1';
+const SW_DT = 5, SW_REC = 60, SW_STAT = 300;       // physics step, track point, statistics step (s)
+const SW_TAU = 2 * 3600;                           // how long a wind error lasts (s)
+const SW_GONE = 9;                                 // phase code in the tracks: left the wind data
+const swFlying = ph => ph !== SW_GONE && FLYING(ph);
+const SW_COV = 0.05;                               // camera-coverage cell (degrees)
+const SW_GROUND_ANT = 2;                           // ground-station antenna height (m)
+const SW_STOPS = [[0, [79, 140, 255]], [0.25, [40, 200, 175]], [0.5, [168, 214, 80]], [0.75, [245, 196, 80]], [1, [242, 112, 96]]];
+function swColor(i, n, a = 1) {
+  const x = n > 1 ? i / (n - 1) : 0.5;
+  let k = 0; while (k < SW_STOPS.length - 2 && x > SW_STOPS[k + 1][0]) k++;
+  const [x0, c0] = SW_STOPS[k], [x1, c1] = SW_STOPS[k + 1], f = (x - x0) / (x1 - x0);
+  const c = c0.map((v, m) => Math.round(v + f * (c1[m] - v)));
+  return `rgba(${c[0]},${c[1]},${c[2]},${a})`;
+}
+const SW_FIELDS = { n: 'swN', mode: 'swMode', zLo: 'swZlo', zHi: 'swZhi', floatH: 'swFloatH', launch: 'swLaunch', every: 'swEvery',
+  lineKm: 'swLineKm', lineBrg: 'swLineBrg', areaKm: 'swAreaKm', lift: 'swLift', err: 'swErr', radio: 'swRadio', hours: 'swHours', seed: 'swSeed' };
+function swReadForm() {
+  const c = {};
+  for (const [k, id] of Object.entries(SW_FIELDS)) { const v = $(id).value; c[k] = k === 'mode' || k === 'launch' ? v : +v; }
+  c.n = Math.max(1, Math.min(100, Math.round(c.n || 1)));
+  if (!(c.zHi >= c.zLo)) [c.zLo, c.zHi] = [c.zHi, c.zLo];
+  for (const k of ['every', 'lineKm', 'areaKm', 'lift', 'err', 'floatH']) c[k] = Math.max(0, c[k] || 0);
+  c.radio = Math.max(1, c.radio || 150); c.hours = Math.max(1, Math.min(120, c.hours || 24)); c.seed = Math.max(1, Math.round(c.seed || 1));
+  return c;
+}
+function swNote(html, warn) { const n = $('swNote'); n.innerHTML = html; n.classList.toggle('warn', !!warn); }
+function swNoteIdle() {
+  if (SW.running) return;
+  const src = WIND.real ? `<b>NOAA GFS</b> ${GFS.head.run.replace('T', ' ')} run` : '<b>example</b> wind - not real weather (choose GFS in the wind panel)';
+  const m = $('swMode').value;
+  swNote(`Launch ${fmtLocal(WIND.t0)} (your time) from the launch site · ${src}.` +
+    (m === 'mission' ? (S.target ? ` Every balloon flies the mission to <b>${esc(S.targetName || 'the target')}</b>.` : ' <b>Set a target</b> on the map first.') : ''),
+    m === 'mission' && !S.target);
+}
+function swFormSync() {
+  const m = $('swMode').value, l = $('swLaunch').value;
+  document.querySelectorAll('#swForm .f-float').forEach(e => { e.hidden = m !== 'float'; });
+  document.querySelectorAll('#swForm .f-line').forEach(e => { e.hidden = l !== 'line'; });
+  document.querySelectorAll('#swForm .f-area').forEach(e => { e.hidden = l !== 'area'; });
+  $('swNv').textContent = $('swN').value;
+  swNoteIdle();
+}
+function swSave() { try { localStorage.setItem(SW_KEY, JSON.stringify(swReadForm())); } catch (e) {} }
+function swLoadForm() {
+  let c = null;
+  try { c = JSON.parse(localStorage.getItem(SW_KEY) || 'null'); } catch (e) {}
+  if (c) for (const [k, id] of Object.entries(SW_FIELDS)) if (c[k] != null && c[k] !== '') $(id).value = c[k];
+  swFormSync();
+}
+
+// wind for the swarm by latitude/longitude: the GFS grid, or the example field around its origin
+function swWind(lat, lon, z, ep, out) {
+  if (WIND.real) return gfsSample(lat, lon, z, ep, out);
+  const [n, e] = llToNE(WIND.origin, lat, lon);
+  return WIND.sampleExample(n, e, z, ep - WIND.t0, out);
+}
+const swGround = (lat, lon) => WIND.real ? gfsTerrain(lat, lon) : S.groundAlt;
+
+// launch plan: site, time, lift and float altitude of every balloon
+function swPlanBalloons(c) {
+  const rng = mulberry32(c.seed * 9973 + 17), out = [];
+  for (let i = 0; i < c.n; i++) {
+    let lat = S.launch[0], lon = S.launch[1];
+    if (c.launch === 'line') {
+      const d = (c.n > 1 ? i / (c.n - 1) - 0.5 : 0) * c.lineKm * 1000, b = c.lineBrg * D2R;
+      [lat, lon] = offsetLatLon(lat, lon, d * Math.cos(b), d * Math.sin(b));
+    } else if (c.launch === 'area') {
+      const r = c.areaKm * 1000 * Math.sqrt(rng()), a = 2 * Math.PI * rng();
+      [lat, lon] = offsetLatLon(lat, lon, r * Math.cos(a), r * Math.sin(a));
+    }
+    const fl = Math.max(0.3, BAL.freeLift0 * (1 + c.lift / 100 * gauss(rng)));
+    out.push({ i, lat, lon, tLaunch: i * c.every * 60, ground: swGround(lat, lon), freeLift: fl,
+      mHe: (BAL.mPayload + BAL.mBalloon + BAL.mBallast0 + fl) / LIFT_PER_KG_HE,
+      zFloat: (c.n > 1 ? c.zLo + (c.zHi - c.zLo) * i / (c.n - 1) : (c.zLo + c.zHi) / 2) * 1000,
+      seed: c.seed * 7919 + i * 104729 + 1 });
+  }
+  return out;
+}
+
+// fly one balloon; its track is kept every SW_REC seconds on the common timeline
+function swFly(b, c, NTL) {
+  const lat = new Float32Array(NTL).fill(NaN), lon = new Float32Array(NTL).fill(NaN), alt = new Float32Array(NTL).fill(NaN), ph = new Uint8Array(NTL);
+  Object.assign(b, { rec: { lat, lon, alt, ph }, events: [], status: 'waiting', peak: b.ground, tLand: null, ride: null, burst: false });
+  const j0 = Math.ceil(b.tLaunch / SW_REC);
+  for (let k = 0; k < Math.min(j0, NTL); k++) { lat[k] = b.lat; lon[k] = b.lon; alt[k] = b.ground; }   // waiting on the pad
+  if (j0 >= NTL) return;
+  if (!windInside(b.lat, b.lon)) { b.status = 'outside'; return; }
+  const f = newFlight(b.ground), o = [b.lat, b.lon], rng = mulberry32(b.seed);
+  f.mHe = b.mHe; f.lat = b.lat; f.lon = b.lon;
+  const ctx = { groundAlt: b.ground, control: c.mode === 'mission', events: [], atm: WIND.real ? realAtm : null,
+    target: c.mode === 'mission' && S.target ? llToNE(o, S.target[0], S.target[1]) : null };
+  const sig = c.err, a = Math.exp(-SW_DT / SW_TAU), q = sig * Math.sqrt(1 - a * a), ep0 = WIND.t0 + b.tLaunch;
+  let nN = sig * gauss(rng), nE = sig * gauss(rng);
+  ctx.wind = (n, e, z, t, out, ff) => {
+    const la = ff ? ff.lat : o[0] + n / R_E / D2R, lo = ff ? ff.lon : o[1] + e / (R_E * Math.cos(o[0] * D2R)) / D2R;
+    const u = swWind(la, lo, z, ep0 + t, out);
+    if (ff) { u[0] += nN; u[1] += nE; }                 // the forecast error moves the balloon, not its controller's guess
+    return u;
+  };
+  b.status = 'airborne';
+  b.events.push({ type: 'launch', t: 0, lat: f.lat, lon: f.lon, z: f.z });
+  for (let j = j0; j < NTL; j++) {
+    const tRel = j * SW_REC - b.tLaunch;
+    while (f.t < tRel - 1e-6 && b.status === 'airborne') {
+      const h = Math.min(SW_DT, tRel - f.t);
+      if (sig) { nN = a * nN + q * gauss(rng); nE = a * nE + q * gauss(rng); }
+      altitudeControl(f, h);
+      const n0 = f.n, e0 = f.e;
+      physicsStep(f, ctx, h);
+      f.lat += (f.n - n0) / R_E / D2R;
+      f.lon += (f.e - e0) / (R_E * Math.cos(f.lat * D2R)) / D2R;
+      if (!windInside(f.lat, f.lon)) { b.status = 'gone'; b.events.push({ type: 'gone', t: f.t, lat: f.lat, lon: f.lon, z: f.z }); break; }
+      if (f.phase === PH.DESCENT && WIND.real) ctx.groundAlt = gfsTerrain(f.lat, f.lon);
+      missionStep(f, ctx);
+      if (c.mode === 'float' && f.attached) {
+        if (f.phase === PH.ASCENT && f.zSet == null && f.z >= b.zFloat - 1200) { f.zSet = b.zFloat; b.ride = b.zFloat; setPhase(f, ctx, PH.JET, 'float'); }
+        else if (f.phase === PH.JET && f.t - f.tPhase >= c.floatH * 3600) cutDown(f, ctx, 'cut');
+      }
+      if (ctx.events.length) {
+        for (const ev of ctx.events) {
+          if (ev.type === 'jet' && b.ride == null) b.ride = ev.ride;
+          if (ev.type === 'burst') b.burst = true;
+          b.events.push({ type: ev.type, t: ev.t, lat: f.lat, lon: f.lon, z: ev.z });
+        }
+        ctx.events.length = 0;
+      }
+      if (f.z > b.peak) b.peak = f.z;
+      if (f.phase === PH.LANDED) { b.status = 'landed'; b.tLand = f.t; }
+    }
+    if (b.status === 'gone') { for (let k = j; k < NTL; k++) ph[k] = SW_GONE; break; }
+    lat[j] = f.lat; lon[j] = f.lon; alt[j] = f.z; ph[j] = f.phase;
+    if (b.status === 'landed') { for (let k = j + 1; k < NTL; k++) { lat[k] = f.lat; lon[k] = f.lon; alt[k] = f.z; ph[k] = PH.LANDED; } break; }
+  }
+  b.end = { lat: f.lat, lon: f.lon, z: f.z, t: f.t };
+}
+
+// ---------------------------------------------------------------------
+//  Radio mesh and camera coverage
+// ---------------------------------------------------------------------
+const swDist = (la1, lo1, la2, lo2) => Math.hypot((lo2 - lo1) * Math.cos((la1 + la2) * D2R / 2), la2 - la1) * D2R * R_E;
+const swHorizon = (h1, h2) => 4120 * (Math.sqrt(Math.max(0, h1)) + Math.sqrt(Math.max(0, h2)));   // radio horizon, m (4/3 earth)
+// airborne balloons at track point j, their hops from the ground station, and (optional) every link to draw
+function swNet(j, withLinks) {
+  const R = SW.res, maxD = R.c.radio * 1000, nodes = [], links = [], g = R.gs;
+  for (const b of R.balloons) {
+    if (!b.rec || !swFlying(b.rec.ph[j])) continue;
+    const la = b.rec.lat[j], lo = b.rec.lon[j];
+    nodes.push({ b, lat: la, lon: lo, agl: b.rec.alt[j] - swGround(la, lo), hop: -1 });
+  }
+  const ok = (p, q) => { const d = swDist(p.lat, p.lon, q.lat, q.lon); return d <= maxD && d <= swHorizon(p.agl, q.agl); };
+  let frontier = [];
+  for (const n of nodes) if (ok(g, n)) { n.hop = 1; frontier.push(n); if (withLinks) links.push([g, n]); }
+  for (let hop = 2; frontier.length; hop++) {
+    const next = [];
+    for (const p of frontier) for (const n of nodes) if (n.hop < 0 && ok(p, n)) { n.hop = hop; next.push(n); }
+    frontier = next;
+  }
+  if (withLinks) for (let i = 0; i < nodes.length; i++) for (let k = i + 1; k < nodes.length; k++) if (ok(nodes[i], nodes[k])) links.push([nodes[i], nodes[k]]);
+  return { nodes, links };
+}
+function swAnalyse() {
+  const R = SW.res, { balloons, NTL } = R, every = SW_STAT / SW_REC, NS = Math.floor((NTL - 1) / every) + 1, dm = SW_STAT / 60;
+  const air = new Uint16Array(NS), linked = new Uint16Array(NS), watch = new Uint16Array(NS), high = new Uint16Array(NS);
+  const tgt = S.target, range = GIMBAL.range, minAgl = GIMBAL.minAgl;
+  balloons.forEach(b => Object.assign(b, { watchMin: 0, closest: Infinity, linkedMin: 0, airMin: 0 }));
+  let la0 = 90, la1 = -90, lo0 = 360, lo1 = -360;
+  for (const b of balloons) for (let j = 0; j < NTL; j += every) {
+    const la = b.rec.lat[j], lo = b.rec.lon[j];
+    if (la === la) { la0 = Math.min(la0, la); la1 = Math.max(la1, la); lo0 = Math.min(lo0, lo); lo1 = Math.max(lo1, lo); }
+  }
+  la0 -= 0.3; la1 += 0.3; lo0 -= 0.4; lo1 += 0.4;
+  const cy = Math.max(1, Math.ceil((la1 - la0) / SW_COV)), cx = Math.max(1, Math.ceil((lo1 - lo0) / SW_COV));
+  const cov = new Float32Array(cx * cy), stamp = new Int32Array(cx * cy).fill(-1);
+  let maxHop = 0, allLinked = 0, withAir = 0, coverS = 0, firstWatch = null, firstAir = null, lastAir = null, sumAir = 0, sumLinked = 0;
+  for (let s = 0; s < NS; s++) {
+    const net = swNet(s * every, false);
+    let L = 0, W = 0;
+    for (const n of net.nodes) {
+      n.b.airMin += dm;
+      if (n.hop > 0) { L++; n.b.linkedMin += dm; if (n.hop > maxHop) maxHop = n.hop; }
+      if (tgt) {
+        const d = swDist(n.lat, n.lon, tgt[0], tgt[1]);
+        if (d < n.b.closest) n.b.closest = d;
+        if (d <= range && n.agl >= minAgl) { W++; n.b.watchMin += dm; }
+      }
+      if (n.agl >= minAgl) {                         // camera coverage: cells within the gimbal range
+        high[s]++;
+        const dLa = range / R_E / D2R, dLo = dLa / Math.cos(n.lat * D2R);
+        const y0 = Math.max(0, Math.floor((n.lat - dLa - la0) / SW_COV)), y1 = Math.min(cy - 1, Math.floor((n.lat + dLa - la0) / SW_COV));
+        const x0 = Math.max(0, Math.floor((n.lon - dLo - lo0) / SW_COV)), x1 = Math.min(cx - 1, Math.floor((n.lon + dLo - lo0) / SW_COV));
+        for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
+          const k = y * cx + x;
+          if (stamp[k] === s || swDist(n.lat, n.lon, la0 + (y + 0.5) * SW_COV, lo0 + (x + 0.5) * SW_COV) > range) continue;
+          stamp[k] = s; cov[k] += dm;
+        }
+      }
+    }
+    air[s] = net.nodes.length; linked[s] = L; watch[s] = W; sumAir += air[s]; sumLinked += L;
+    if (air[s]) { withAir++; if (firstAir == null) firstAir = s; lastAir = s; if (L === air[s]) allLinked++; }
+    if (W) { coverS++; if (firstWatch == null) firstWatch = s * SW_STAT; }
+  }
+  let covMax = 0; for (let k = 0; k < cov.length; k++) if (cov[k] > covMax) covMax = cov[k];
+  const lands = balloons.filter(b => b.status === 'landed');
+  const cLa = lands.reduce((a, b) => a + b.end.lat, 0) / (lands.length || 1), cLo = lands.reduce((a, b) => a + b.end.lon, 0) / (lands.length || 1);
+  R.stats = { NS, every, air, linked, watch, high, maxHop, allLinked, withAir, coverS, firstWatch, firstAir, lastAir, sumAir, sumLinked,
+    cov: { la0, lo0, cx, cy, data: cov, max: covMax },
+    land: lands.length ? { lat: cLa, lon: cLo, spread: Math.max(...lands.map(b => swDist(cLa, cLo, b.end.lat, b.end.lon))),
+      mean: lands.reduce((a, b) => a + swDist(b.lat, b.lon, b.end.lat, b.end.lon), 0) / lands.length } : null };
+}
+
+// ---------------------------------------------------------------------
+//  Run, time control, statistics, table
+// ---------------------------------------------------------------------
+async function swRun() {
+  if (SW.running) return;
+  const c = swReadForm(); swSave();
+  if (c.mode === 'mission' && !S.target) { swNote('The jet-stream mission needs a target: press <b>Set target</b> on the map.', true); return; }
+  if (S.windSrc === 'gfs' && !WIND.real) { swNote('The GFS forecast is still loading - try again in a moment.', true); return; }
+  ensureWind();
+  const dataEnd = WIND.real ? GFS.t1 : WIND.t0 + (WIND.NT - 1) * WIND.DT;
+  if (WIND.real && WIND.t0 < GFS.t0) { swNote(`The forecast starts ${fmtLocal(GFS.t0)} - set a later launch time.`, true); return; }
+  const tEnd = Math.floor(Math.min(c.hours * 3600, dataEnd - WIND.t0) / SW_REC) * SW_REC;
+  if (tEnd < 1800) { swNote(`The wind data ends ${fmtLocal(dataEnd)} - set an earlier launch time or load a newer forecast.`, true); return; }
+  swStop(); SW.running = true; $('swRun').disabled = true;
+  const NTL = tEnd / SW_REC + 1, balloons = swPlanBalloons(c), tA = performance.now();
+  for (let k = 0; k < balloons.length; k++) {
+    swFly(balloons[k], c, NTL);
+    if (k % 4 === 3 || k === balloons.length - 1) { swNote(`Flying balloon ${k + 1} of ${balloons.length}…`); await new Promise(r => setTimeout(r, 0)); }
+  }
+  SW.res = { c, balloons, NTL, tEnd, gs: { lat: S.launch[0], lon: S.launch[1], agl: SW_GROUND_ANT }, t0: WIND.t0,
+    wind: WIND.real ? `NOAA GFS ${GFS.head.run.replace('T', ' ')}` : 'example field', proj: null };
+  swNote('Working out the radio mesh and the camera coverage…'); await new Promise(r => setTimeout(r, 0));
+  swAnalyse();
+  SW.running = false; $('swRun').disabled = false; SW.sel = null;
+  const st = SW.res.stats;
+  let best = 0; for (let s = 1; s < st.NS; s++) if (st.high[s] > st.high[best]) best = s;   // show the moment most are up high
+  $('swT').max = tEnd;
+  swRenderTable(); swFit(); swSetT(best * SW_STAT);
+  const n = balloons.length, landed = balloons.filter(b => b.status === 'landed').length, gone = balloons.filter(b => b.status === 'gone').length;
+  const msg = `${n} balloon${n > 1 ? 's' : ''} · ${landed} landed · ${gone} left the wind area · radio: ${st.sumAir ? Math.round(100 * st.sumLinked / st.sumAir) : 0} % of flight time linked to the ground` +
+    (S.target ? ` · target watched ${st.lastAir != null ? Math.round(100 * st.coverS / (st.lastAir - st.firstAir + 1)) : 0} % of the time` : '');
+  swNote(`Done in ${((performance.now() - tA) / 1000).toFixed(1)} s with the ${SW.res.wind} wind. ${msg}.`);
+  log(`Swarm: ${msg}`, 'good');
+}
+function swClear() {
+  swStop(); SW.res = null; SW.sel = null;
+  $('swBody').innerHTML = ''; $('swStats').innerHTML = ''; setText('swTv', '—');
+  swDraw(); drawSwChart(); swNoteIdle();
+}
+function swStop() { if (SW.play) { clearInterval(SW.play); SW.play = null; } $('swPlay').textContent = '▶'; }
+function swSetT(t) {
+  const R = SW.res; if (!R) return;
+  SW.t = Math.max(0, Math.min(R.tEnd, Math.round(t / SW_REC) * SW_REC));
+  $('swT').value = SW.t;
+  setText('swTv', `${fmtT(SW.t)} · ${fmtLocal(R.t0 + SW.t)}`);
+  swDraw(); drawSwChart(); swRenderStats(); S.dirty = true;
+}
+function swRenderStats() {
+  const R = SW.res; if (!R || !R.stats) return;
+  const st = R.stats, j = Math.round(SW.t / SW_REC), net = swNet(j, false), B = R.balloons;
+  const L = net.nodes.filter(n => n.hop > 0).length, maxHop = Math.max(0, ...net.nodes.map(n => n.hop));
+  const W = S.target ? net.nodes.filter(n => swDist(n.lat, n.lon, S.target[0], S.target[1]) <= GIMBAL.range && n.agl >= GIMBAL.minAgl).length : 0;
+  const launched = B.filter(b => b.status !== 'waiting' && b.status !== 'outside').length;
+  const landed = B.filter(b => b.status === 'landed').length, burst = B.filter(b => b.burst).length, gone = B.filter(b => b.status === 'gone').length;
+  const pct = x => `${Math.round(100 * x)}<span class="u">%</span>`;
+  const span = st.lastAir != null ? st.lastAir - st.firstAir + 1 : 0;
+  const tile = (k, v, sub) => `<div class="stat"><div class="k">${k}</div><div class="v">${v}</div>${sub ? `<div class="k" style="margin:2px 0 0">${sub}</div>` : ''}</div>`;
+  $('swStats').innerHTML =
+    tile('Flying now', `${net.nodes.length}<span class="u">of ${B.length}</span>`, `${launched} launched in all`) +
+    tile('Linked to ground now', `${L}<span class="u">of ${net.nodes.length}</span>`, net.nodes.length ? `up to ${maxHop} hop${maxHop === 1 ? '' : 's'} · radio ${R.c.radio} km` : `radio ${R.c.radio} km`) +
+    tile('Watching target now', S.target ? `${W}` : '—', S.target ? `within ${GIMBAL.range / 1000} km, ≥ ${GIMBAL.minAgl / 1000} km up` : 'no target set') +
+    tile('Landed', `${landed}`, `${burst} burst · ${gone} left the wind area`) +
+    tile('Radio mesh', st.sumAir ? pct(st.sumLinked / st.sumAir) : '—', `of flight time linked · all linked ${st.withAir ? Math.round(100 * st.allLinked / st.withAir) : 0} %`) +
+    tile('Target coverage', S.target && span ? pct(st.coverS / span) : '—', S.target ? (st.firstWatch != null ? `first picture ${fmtT(st.firstWatch)} · ${B.filter(b => b.watchMin > 0).length} balloons` : 'never within camera range') : 'no target set') +
+    tile('Landing spread', st.land ? fmtDist(st.land.spread) : '—', st.land ? `radius around the centre · mean ${fmtDistTxt(st.land.mean)} from launch` : 'none landed yet') +
+    tile('Wind', R.wind.startsWith('NOAA') ? 'GFS' : 'example', `${esc(R.wind)} · error ±${R.c.err} m/s`);
+}
+function swRenderTable() {
+  const R = SW.res; if (!R) { $('swBody').innerHTML = ''; return; }
+  const ST = { landed: 'landed', gone: 'left the area', airborne: 'still flying', waiting: 'not launched', outside: 'outside the data' };
+  $('swBody').innerHTML = R.balloons.map(b => {
+    const land = b.status === 'landed' ? distBearing([b.lat, b.lon], [b.end.lat, b.end.lon]) : null;
+    const flight = b.status === 'waiting' || b.status === 'outside' ? '—' : fmtDur(b.status === 'landed' ? b.tLand : b.end.t);
+    return `<tr data-i="${b.i}" class="${SW.sel === b.i ? 'sel' : ''}"><td><span class="sw-dot" style="background:${swColor(b.i, R.balloons.length)}"></span>${b.i + 1}</td>` +
+      `<td>${fmtT(b.tLaunch)}</td><td>${b.ride != null ? (b.ride / 1000).toFixed(1) + ' km' : `peak ${(b.peak / 1000).toFixed(1)} km`}</td><td>${flight}</td>` +
+      `<td style="text-align:left">${ST[b.status] || b.status}${b.burst ? ' · burst' : ''}</td><td>${land ? `${(land.d / 1000).toFixed(0)} km ${point(land.brg)}` : '—'}</td>` +
+      `<td>${S.target && b.closest < Infinity ? `${(b.closest / 1000).toFixed(0)} km${b.watchMin ? ` · ${Math.round(b.watchMin)} min` : ''}` : '—'}</td></tr>`;
+  }).join('');
+}
+function swAltAt(i, t) {
+  const R = SW.res, b = R && R.balloons[i];
+  if (!b || !b.rec) return S.plan ? S.plan.ride : 11000;
+  const z = b.rec.alt[Math.min(R.NTL - 1, Math.round(t / SW_REC))];
+  return z === z ? z : (S.plan ? S.plan.ride : 11000);
+}
+function swFit() {
+  const R = SW.res; if (!R || !map) return;
+  const pts = [S.launch];
+  for (const b of R.balloons) if (b.rec) for (let j = 0; j < R.NTL; j += 10) if (b.rec.lat[j] === b.rec.lat[j]) pts.push([b.rec.lat[j], b.rec.lon[j]]);
+  if (S.target) pts.push(S.target);
+  $('chkFollow').checked = false;
+  if (pts.length > 1) map.fitBounds(L.latLngBounds(pts).pad(0.08));
+}
+
+// ---------------------------------------------------------------------
+//  Map layer: camera coverage, tracks, radio links, balloons
+// ---------------------------------------------------------------------
+const SWL = { c: null, raf: 0 };
+function initSwarmLayer() {
+  if (!map) return;
+  const pane = map.createPane('swarmPane');
+  pane.style.zIndex = 450; pane.style.pointerEvents = 'none';
+  SWL.c = L.DomUtil.create('canvas', 'sw-canvas', pane);
+  map.on('move resize viewreset zoomend', swDraw);
+  map.on('zoomstart', () => { SWL.c.style.visibility = 'hidden'; });
+  map.on('zoomend', () => { SWL.c.style.visibility = ''; });
+  map.on('mousemove', swHover);
+  map.on('mouseout', () => { $('swMapTip').hidden = true; });
+}
+function swDraw() { if (!SWL.raf) SWL.raf = requestAnimationFrame(() => { SWL.raf = 0; swDrawNow(); }); }
+// projected (pixel) coordinates of every track point at the current zoom, cached
+function swProj() {
+  const R = SW.res, z = map.getZoom();
+  if (R.proj && R.proj.z === z) return R.proj;
+  const tr = R.balloons.map(b => {
+    if (!b.rec) return null;
+    const x = new Float32Array(R.NTL), y = new Float32Array(R.NTL);
+    for (let j = 0; j < R.NTL; j++) { const la = b.rec.lat[j]; if (la !== la) { x[j] = NaN; continue; } const p = map.project([la, b.rec.lon[j]], z); x[j] = p.x; y[j] = p.y; }
+    return { x, y };
+  });
+  return (R.proj = { z, tr });
+}
+function swDrawNow() {
+  const c = SWL.c; if (!c || !map) return;
+  const size = map.getSize(), dpr = devicePixelRatio || 1;
+  L.DomUtil.setPosition(c, map.containerPointToLayerPoint([0, 0]));
+  c.style.width = size.x + 'px'; c.style.height = size.y + 'px';
+  if (c.width !== size.x * dpr || c.height !== size.y * dpr) { c.width = size.x * dpr; c.height = size.y * dpr; }
+  const g = c.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, size.x, size.y);
+  const R = SW.res; if (!R) return;
+  const N = R.balloons.length, j = Math.min(R.NTL - 1, Math.round(SW.t / SW_REC)), o = map.getPixelBounds().min, P = swProj();
+  const cp = (la, lo) => map.latLngToContainerPoint([la, lo]);
+  // camera coverage: minutes the gimbal camera could see each cell (whole run)
+  if ($('swShowCov').checked && R.stats) {
+    const cv = R.stats.cov;
+    for (let y = 0; y < cv.cy; y++) {
+      const la = cv.la0 + y * SW_COV, pA = cp(la + SW_COV, cv.lo0), pB = cp(la, cv.lo0);
+      if (pB.y < 0 || pA.y > size.y) continue;
+      for (let x = 0; x < cv.cx; x++) {
+        const m = cv.data[y * cv.cx + x]; if (!m) continue;
+        const q1 = cp(la + SW_COV, cv.lo0 + x * SW_COV), q2 = cp(la, cv.lo0 + (x + 1) * SW_COV);
+        if (q2.x < 0 || q1.x > size.x) continue;
+        const f = Math.min(1, Math.sqrt(m / Math.max(30, cv.max)));
+        g.fillStyle = `rgba(242,${Math.round(196 - 90 * f)},${Math.round(80 - 40 * f)},${0.18 + 0.42 * f})`;
+        g.fillRect(q1.x, q1.y, q2.x - q1.x + 0.5, q2.y - q1.y + 0.5);
+      }
+    }
+  }
+  // tracks: whole flight faint, flown part (up to the slider time) bright
+  if ($('swShowTracks').checked) {
+    g.lineJoin = 'round'; g.lineCap = 'round';
+    R.balloons.forEach((b, i) => {
+      const t = P.tr[i]; if (!t) return;
+      const sel = SW.sel === i, path = (a, z) => {
+        g.beginPath(); let pen = false;
+        for (let k = a; k <= z; k += k + 3 <= z ? 3 : 1) {
+          const ph = b.rec.ph[k];
+          if (t.x[k] !== t.x[k] || ph === 0 || ph === SW_GONE) { pen = false; continue; }
+          const X = t.x[k] - o.x, Y = t.y[k] - o.y;
+          if (pen) g.lineTo(X, Y); else { g.moveTo(X, Y); pen = true; }
+          if (ph === PH.LANDED) break;
+        }
+      };
+      path(0, R.NTL - 1); g.strokeStyle = swColor(i, N, sel ? 0.55 : 0.22); g.lineWidth = sel ? 2.5 : 1.3; g.stroke();
+      path(0, j); g.strokeStyle = swColor(i, N, 0.95); g.lineWidth = sel ? 3.5 : 1.8; g.stroke();
+    });
+  }
+  // radio links and balloons at the slider time
+  const net = swNet(j, $('swShowLinks').checked), gp = cp(R.gs.lat, R.gs.lon);
+  const xy = n => n === R.gs ? gp : { x: P.tr[n.b.i].x[j] - o.x, y: P.tr[n.b.i].y[j] - o.y };
+  if ($('swShowLinks').checked) {
+    for (const [p, q] of net.links) {
+      const a = xy(p), b = xy(q);
+      g.strokeStyle = p === R.gs ? 'rgba(47,179,107,.85)' : 'rgba(94,200,242,.45)'; g.lineWidth = p === R.gs ? 1.8 : 1;
+      g.beginPath(); g.moveTo(a.x, a.y); g.lineTo(b.x, b.y); g.stroke();
+    }
+  }
+  R.balloons.forEach((b, i) => {
+    const t = P.tr[i]; if (!t || t.x[j] !== t.x[j]) return;
+    const ph = b.rec.ph[j], X = t.x[j] - o.x, Y = t.y[j] - o.y;
+    if (X < -20 || Y < -20 || X > size.x + 20 || Y > size.y + 20) return;
+    if (ph === PH.LANDED) {
+      g.strokeStyle = swColor(i, N, 0.9); g.lineWidth = 1.8;
+      g.beginPath(); g.moveTo(X - 3.5, Y - 3.5); g.lineTo(X + 3.5, Y + 3.5); g.moveTo(X + 3.5, Y - 3.5); g.lineTo(X - 3.5, Y + 3.5); g.stroke();
+    } else if (swFlying(ph)) {
+      const n = net.nodes.find(q => q.b === b), lost = n && n.hop < 0;
+      g.fillStyle = swColor(i, N, 1); g.strokeStyle = lost ? '#e5534b' : '#0c1016'; g.lineWidth = lost ? 2 : 1.5;
+      g.beginPath(); g.arc(X, Y, SW.sel === i ? 6.5 : 4.5, 0, 7); g.fill(); g.stroke();
+      if (SW.sel === i) { g.strokeStyle = '#fff'; g.lineWidth = 1.5; g.beginPath(); g.arc(X, Y, 9.5, 0, 7); g.stroke(); }
+    }
+  });
+}
+function swHover(e) {
+  const tip = $('swMapTip'), R = SW.res;
+  if (!R || !map) { tip.hidden = true; return; }
+  const j = Math.min(R.NTL - 1, Math.round(SW.t / SW_REC)), P = swProj(), o = map.getPixelBounds().min, m = e.containerPoint;
+  let best = null, bd = 12;
+  R.balloons.forEach((b, i) => {
+    const t = P.tr[i]; if (!t || t.x[j] !== t.x[j] || !(swFlying(b.rec.ph[j]) || b.rec.ph[j] === PH.LANDED)) return;
+    const d = Math.hypot(t.x[j] - o.x - m.x, t.y[j] - o.y - m.y);
+    if (d < bd) { bd = d; best = b; }
+  });
+  if (!best) { tip.hidden = true; return; }
+  const ph = best.rec.ph[j], n = swNet(j, false).nodes.find(q => q.b === best), db = distBearing([best.lat, best.lon], [best.rec.lat[j], best.rec.lon[j]]);
+  tip.hidden = false; tip.style.left = m.x + 'px'; tip.style.top = m.y + 'px';
+  tip.textContent = `#${best.i + 1} · ${(best.rec.alt[j] / 1000).toFixed(1)} km · ${ph === PH.LANDED ? 'landed' : ph === PH.JET ? 'riding' : PNAME[ph].toLowerCase()} · ` +
+    `${(db.d / 1000).toFixed(0)} km ${point(db.brg)} of its launch` + (n ? (n.hop > 0 ? ` · radio: ${n.hop} hop${n.hop > 1 ? 's' : ''}` : ' · no radio link') : '');
+}
+
+// ---------------------------------------------------------------------
+//  Chart: flying / linked to the ground / watching the target over time
+// ---------------------------------------------------------------------
+let swChartHover = null;
+function drawSwChart() {
+  const c = $('swChart'), dpr = devicePixelRatio || 1, W = c.clientWidth, H = c.clientHeight;
+  if (!W || !H) return;
+  if (c.width !== W * dpr || c.height !== H * dpr) { c.width = W * dpr; c.height = H * dpr; }
+  const g = c.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, W, H);
+  const R = SW.res;
+  g.font = '11px ui-monospace,SF Mono,Consolas,monospace';
+  if (!R || !R.stats) { g.fillStyle = '#7a8794'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText('Set up the swarm on the left and press Run swarm', W / 2, H / 2); return; }
+  const st = R.stats, N = R.balloons.length, Lm = 34, Rm = 10, Tm = 22, Bm = 20, pw = W - Lm - Rm, ph = H - Tm - Bm;
+  const yMax = Math.max(1, ...st.air), X = t => Lm + t / R.tEnd * pw, Y = v => Tm + ph - v / yMax * ph;
+  g.strokeStyle = '#212b36'; g.lineWidth = 1; g.fillStyle = '#7a8794'; g.textAlign = 'right'; g.textBaseline = 'middle';
+  const ys = yMax <= 5 ? 1 : yMax <= 20 ? 5 : yMax <= 50 ? 10 : 20;
+  for (let v = 0; v <= yMax; v += ys) { const y = Math.round(Y(v)) + .5; g.beginPath(); g.moveTo(Lm, y); g.lineTo(Lm + pw, y); g.stroke(); g.fillText(v, Lm - 6, y); }
+  g.textAlign = 'center'; g.textBaseline = 'top';
+  let step = 3600; while (pw / (R.tEnd / step) < 46) step *= 2;
+  for (let t = 0; t <= R.tEnd; t += step) g.fillText(`${Math.round(t / 3600)} h`, X(t), Tm + ph + 5);
+  const series = [['air', '#3987e5', 'flying'], ['linked', '#2fb36b', 'linked to ground']];
+  if (S.target) series.push(['watch', '#e66767', 'watching target']);
+  for (const [k, col] of series) {
+    g.strokeStyle = col; g.lineWidth = 2; g.lineJoin = 'round'; g.beginPath();
+    st[k].forEach((v, s) => { const x = X(s * SW_STAT), y = Y(v); s ? g.lineTo(x, y) : g.moveTo(x, y); }); g.stroke();
+  }
+  let lx = Lm; g.textAlign = 'left'; g.textBaseline = 'middle';
+  for (const [, col, name] of series) { g.fillStyle = col; g.fillRect(lx, 7, 14, 3); g.fillStyle = '#aab5c1'; g.fillText(name, lx + 19, 9); lx += 26 + g.measureText(name).width; }
+  const xc = Math.round(X(SW.t)) + .5;
+  g.strokeStyle = '#e9eef3'; g.lineWidth = 1; g.setLineDash([3, 3]); g.beginPath(); g.moveTo(xc, Tm); g.lineTo(xc, Tm + ph); g.stroke(); g.setLineDash([]);
+  const tip = $('swTip');
+  if (swChartHover != null && swChartHover >= Lm && swChartHover <= Lm + pw) {
+    const s = Math.max(0, Math.min(st.NS - 1, Math.round((swChartHover - Lm) / pw * R.tEnd / SW_STAT))), x = X(s * SW_STAT);
+    g.strokeStyle = '#7a8794'; g.beginPath(); g.moveTo(Math.round(x) + .5, Tm); g.lineTo(Math.round(x) + .5, Tm + ph); g.stroke();
+    tip.hidden = false; tip.style.left = Math.min(Math.max(x, 110), W - 110) + 'px'; tip.style.top = (Tm + 6) + 'px'; tip.style.transform = 'translate(-50%,0)';
+    tip.textContent = `${fmtT(s * SW_STAT)} · ${st.air[s]} flying · ${st.linked[s]} linked` + (S.target ? ` · ${st.watch[s]} watching` : '');
+  } else tip.hidden = true;
+}
+$('swChart').addEventListener('mousemove', e => { swChartHover = e.offsetX; drawSwChart(); });
+$('swChart').addEventListener('mouseleave', () => { swChartHover = null; drawSwChart(); });
+$('swChart').addEventListener('click', e => {
+  const R = SW.res; if (!R) return;
+  const W = $('swChart').clientWidth, t = (e.offsetX - 34) / (W - 44) * R.tEnd;
+  swStop(); swSetT(t);
+});
+
+// ---------------------------------------------------------------------
+//  Exports: CSV (every balloon every 5 min) and KML (3-D tracks for Google Earth)
+// ---------------------------------------------------------------------
+function swDownload(name, text, type) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([text], { type }));
+  a.download = name; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+}
+const swStamp = () => new Date(SW.res.t0 * 1000).toISOString().slice(0, 16).replace(/[-:]/g, '').replace('T', '_');
+const PHN = { 0: 'pad', 1: 'climb', 2: 'descent', 3: 'landed', 4: 'ride', 5: 'climb', 6: 'loiter', 9: 'left wind area' };
+function swCsv() {
+  const R = SW.res; if (!R) { swNote('Run the swarm first.', true); return; }
+  const rows = ['balloon,launch_lat,launch_lon,time_utc,t_after_start_s,lat,lon,alt_m,phase,linked_hops'];
+  for (let j = 0; j < R.NTL; j += SW_STAT / SW_REC) {
+    const net = swNet(j, false), iso = new Date((R.t0 + j * SW_REC) * 1000).toISOString().slice(0, 16) + 'Z';
+    for (const b of R.balloons) {
+      if (!b.rec || b.rec.ph[j] === 0 || b.rec.lat[j] !== b.rec.lat[j]) continue;
+      const n = net.nodes.find(q => q.b === b);
+      rows.push([b.i + 1, b.lat.toFixed(5), b.lon.toFixed(5), iso, j * SW_REC, b.rec.lat[j].toFixed(5), b.rec.lon[j].toFixed(5), Math.round(b.rec.alt[j]), PHN[b.rec.ph[j]] || b.rec.ph[j], n ? Math.max(0, n.hop) : ''].join(','));
+    }
+  }
+  swDownload(`habrecon_swarm_${swStamp()}.csv`, rows.join('\n'), 'text/csv');
+  log(`Swarm exported: ${rows.length - 1} rows (CSV)`);
+}
+function swKml() {
+  const R = SW.res; if (!R) { swNote('Run the swarm first.', true); return; }
+  const N = R.balloons.length, kc = i => { const m = swColor(i, N).match(/\d+/g).map(Number); return 'ff' + [m[2], m[1], m[0]].map(v => v.toString(16).padStart(2, '0')).join(''); };
+  let k = `<?xml version="1.0" encoding="UTF-8"?>\n<kml xmlns="http://www.opengis.net/kml/2.2"><Document><name>HAB-RECON swarm · ${N} balloons · ${esc(R.wind)}</name>`;
+  R.balloons.forEach((b, i) => { k += `<Style id="b${i}"><LineStyle><color>${kc(i)}</color><width>2</width></LineStyle><IconStyle><color>${kc(i)}</color></IconStyle></Style>`; });
+  R.balloons.forEach((b, i) => {
+    if (!b.rec) return;
+    const pts = [];
+    for (let j = 0; j < R.NTL; j += 2) { const ph = b.rec.ph[j]; if (ph === 0 || ph === SW_GONE || b.rec.lat[j] !== b.rec.lat[j]) continue; pts.push(`${b.rec.lon[j].toFixed(5)},${b.rec.lat[j].toFixed(5)},${Math.round(b.rec.alt[j])}`); if (ph === PH.LANDED) break; }
+    if (pts.length < 2) return;
+    k += `<Folder><name>Balloon ${i + 1}</name><Placemark><name>Balloon ${i + 1} · launch ${fmtT(b.tLaunch)}</name><styleUrl>#b${i}</styleUrl><LineString><altitudeMode>absolute</altitudeMode><coordinates>${pts.join(' ')}</coordinates></LineString></Placemark>`;
+    if (b.status === 'landed') k += `<Placemark><name>${i + 1} lands</name><styleUrl>#b${i}</styleUrl><Point><coordinates>${b.end.lon.toFixed(5)},${b.end.lat.toFixed(5)},0</coordinates></Point></Placemark>`;
+    k += '</Folder>';
+  });
+  k += '</Document></kml>';
+  swDownload(`habrecon_swarm_${swStamp()}.kml`, k, 'application/vnd.google-earth.kml+xml');
+  log(`Swarm exported: ${N} tracks (KML for Google Earth)`);
+}
+
+// ---------------------------------------------------------------------
+//  Swarm controls
+// ---------------------------------------------------------------------
+$('swRun').onclick = swRun;
+$('swClear').onclick = swClear;
+$('swCsv').onclick = swCsv;
+$('swKml').onclick = swKml;
+$('swForm').addEventListener('input', e => { if (e.target.id === 'swN') $('swNv').textContent = e.target.value; });
+$('swForm').addEventListener('change', () => { swFormSync(); swSave(); });
+$('swT').oninput = e => { swStop(); swSetT(+e.target.value); };
+$('swPlay').onclick = () => {
+  const R = SW.res; if (!R) return;
+  if (SW.play) { swStop(); return; }
+  if (SW.t >= R.tEnd) swSetT(0);
+  $('swPlay').textContent = '❚❚';
+  SW.play = setInterval(() => { if (SW.t >= R.tEnd) { swStop(); return; } swSetT(SW.t + 360); }, 100);   // 1 h per second
+};
+['swShowTracks', 'swShowLinks', 'swShowCov'].forEach(id => { $(id).onchange = swDraw; });
+$('swBody').addEventListener('click', e => {
+  const tr = e.target.closest('tr'); if (!tr || !SW.res) return;
+  const i = +tr.dataset.i; SW.sel = SW.sel === i ? null : i;
+  swRenderTable(); swDraw(); S.dirty = true;
+  const b = SW.res.balloons[i], j = Math.min(SW.res.NTL - 1, Math.round(SW.t / SW_REC));
+  if (SW.sel != null && map && b.rec && b.rec.lat[j] === b.rec.lat[j]) map.panTo([b.rec.lat[j], b.rec.lon[j]]);
+});
 
 // =====================================================================
 //  Demo mode - simulates payload + radio in the browser (no hardware)
@@ -2725,7 +3562,7 @@ const demo = {
       if (cmd === CMD.LAUNCH && (this.phase === 0 || this.phase === 3)) {
         this.origin = this.launch.slice(); this.det = null; ensureWind();
         this.f = newFlight(CFG.LAUNCH_ALT_M);
-        this.ctx = { wind: windFn(this.origin), groundAlt: CFG.LAUNCH_ALT_M, control: true, target: null, events: [] };
+        this.ctx = { wind: windFn(this.origin), groundAlt: CFG.LAUNCH_ALT_M, control: true, target: null, events: [], atm: WIND.real ? realAtm : null };
         this.retarget(); this.predict();
       }
       if (cmd === CMD.CUTDOWN && this.f && this.f.attached && FLYING(this.f.phase)) { this.userCut = true; cutDown(this.f, this.ctx, 'cut'); this.ffUntil = performance.now() + 2000; }
@@ -2765,7 +3602,11 @@ function loadScript(src) { return new Promise((ok, fail) => { const s = document
   initMap();
   S.stops = loadStops();
   S.target = [RECON.target.lat, RECON.target.lon]; S.targetName = RECON.target.name; S.targetGround = RECON.target.ground;
-  ensureWind(); initWindLayer(); moveTargetGraphics(); replan(); syncWindUI(); visHealth(); renderCats(); renderReport();
+  WIND.t0 = launchEpochDefault();
+  let ws = null; try { ws = JSON.parse(localStorage.getItem(WSRC_KEY) || 'null'); } catch (e) {}
+  ensureWind(); initWindLayer(); initSwarmLayer(); moveTargetGraphics(); replan(); syncWindUI(); visHealth(); renderCats(); renderReport();
+  swLoadForm(); syncWindSrcUI(); drawSwChart();
+  if (ws && ws.src === 'gfs') { S.windSrc = 'gfs'; $('selWindSrc').value = 'gfs'; gfsRequest(); }
   log(`Mission: Sofia → ${S.targetName} with ${S.stops.length} recon stops on the way - "Set target" and "Add stop" change it`);
   log('Dashboard ready. Connect the ground station, or start demo mode.');
   if (!('serial' in navigator)) log('This browser has no Web Serial - use Chrome or Edge for the real hardware', 'warn');

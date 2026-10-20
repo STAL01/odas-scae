@@ -1,6 +1,0 @@
-HAB-RECON v3.1 - 18 Oct 2026
-v3.1: heading (compass) comes only from the GY-91; no GY-91 = no heading ("---").
-      G-load shows "-" without the GY-91. Reflash payload_s3 after updating.
-v3:   recon mission Sofia -> Ruse Airport, recon stops, gimbal camera, Intel report (CSV + KML),
-      real-photo storyboard (vision\make_storyboard.bat).
-The dashboard shows "v3.1" next to the HAB-RECON title.

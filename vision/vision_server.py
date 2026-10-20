@@ -16,6 +16,9 @@ a real camera frame. Detections come back with latitude/longitude.
                                             # offline: use your own satellite image
 API: /api/capture?lat&lon&agl&heading&focal&conf&search   (search = look around N picture
      widths and centre on the busiest spot - the dashboard's recon stops use 2-3)
+     /api/wind?lat&lon&start&hours   NOAA GFS wind forecast for the balloon simulation
+     (downloads in the background - poll until state is 'ready', then /api/wind.bin?file=...;
+      kept in vision/wind_cache, so it also works offline - see gfs_wind.py)
 
 Camera model (change with --focal / --pixel-um / --sensor):
     250 mm lens, 3.45 um pixels, 2048 x 1536 sensor
@@ -41,6 +44,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import numpy as np
 from PIL import Image, ImageFilter
+
+import gfs_wind
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DASHBOARD_DIR = os.path.normpath(os.path.join(HERE, '..', 'dashboard'))
@@ -346,7 +351,8 @@ class Handler(BaseHTTPRequestHandler):
     server_version = 'HAB-RECON-vision/1.0'
 
     def log_message(self, fmt, *a):
-        if '/api/health' not in (a[0] if a else ''):
+        line = str(a[0]) if a else ''
+        if '/api/health' not in line and '/api/wind?' not in line:
             print(time.strftime('%H:%M:%S'), fmt % a)
 
     def _headers(self, code, ctype, length):
@@ -374,7 +380,21 @@ class Handler(BaseHTTPRequestHandler):
             if url.path == '/api/health':
                 return self._json(dict(ok=True, model=f'yolo26{ARGS.model}-obb', provider=SESSION.get_providers()[0],
                                        source='mock image' if ARGS.mock_image else 'Esri World Imagery',
-                                       focal=ARGS.focal, pixel_um=ARGS.pixel_um, sensor=ARGS.sensor, conf=ARGS.conf))
+                                       focal=ARGS.focal, pixel_um=ARGS.pixel_um, sensor=ARGS.sensor, conf=ARGS.conf,
+                                       wind=True, wind_cached=len(gfs_wind.cached(ARGS.wind_cache))))
+            if url.path == '/api/wind':
+                return self._json(gfs_wind.request(q, ARGS.wind_cache))
+            if url.path == '/api/wind/list':
+                return self._json(dict(ok=True, files=gfs_wind.cached(ARGS.wind_cache)))
+            if url.path == '/api/wind.bin':
+                path = gfs_wind.wind_file_path(q.get('file'), ARGS.wind_cache)
+                if not path:
+                    return self._json(dict(ok=False, error='no such wind file'), 404)
+                with open(path, 'rb') as f:
+                    data = f.read()
+                self._headers(200, 'application/octet-stream', len(data))
+                self.wfile.write(data)
+                return
             if url.path == '/api/capture':
                 return self._json(capture(q))
             return self._static(url.path)
@@ -434,6 +454,7 @@ def main():
     p.add_argument('--sensor', type=int, nargs=2, default=[2048, 1536], metavar=('W', 'H'))
     p.add_argument('--max-zoom', type=int, default=19, help='finest satellite zoom level to ask for')
     p.add_argument('--cache', default=os.path.join(HERE, 'tile_cache'))
+    p.add_argument('--wind-cache', default=os.path.join(HERE, 'wind_cache'), help='where GFS wind forecasts are kept')
     p.add_argument('--mock-image', help='use this north-up satellite image instead of Esri (offline)')
     p.add_argument('--mock-gsd', type=float, default=0.3, help='metres per pixel of --mock-image')
     p.add_argument('--mock-center', type=float, nargs=2, metavar=('LAT', 'LON'), help='where the mock image is (default: under the camera)')
@@ -441,6 +462,9 @@ def main():
     ARGS = p.parse_args()
     load_model()
     self_test()
+    w = gfs_wind.cached(ARGS.wind_cache)
+    print(f'Wind: NOAA GFS forecasts from NOMADS on request · {len(w)} kept in {ARGS.wind_cache}'
+          + (f' (newest: run {w[0]["run"]})' if w else ''))
     srv = ThreadingHTTPServer(('127.0.0.1', ARGS.port), Handler)
     url = f'http://localhost:{ARGS.port}/'
     print(f'Vision server running - open {url}  (Ctrl+C to stop)')

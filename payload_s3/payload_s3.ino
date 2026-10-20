@@ -538,7 +538,7 @@ void updateFusedOutputs() {
     outRoll = mon.fused(HC_ROLL, gyRoll);
     outPitch = mon.fused(HC_PITCH, gyPitch);
   }
-  // Heading only from the GY-91: its compass (AK8963) keeps it on magnetic north. The F405-WING has
+  // Heading only from the GY-91: its compass (AK8963) + declination keeps it on true north. The F405-WING has
   // no compass, so its yaw starts at a random angle - it is not used. No GY-91 -> no heading.
   hdgValid = gyFresh();
   if (hdgValid) outHdg = gyYaw;
@@ -764,7 +764,7 @@ void sendTelemetry() {
   t.version = PROTO_VERSION;
   uint32_t now = millis();
   uint8_t f = fl.real ? FLAG_GPS_REAL : FLAG_GPS_SIM;
-  if (imu::magOk && gyFresh()) f |= FLAG_MAG_OK;   // the GY-91 compass works: heading is on magnetic north
+  if (imu::magOk && gyFresh()) f |= FLAG_MAG_OK;   // the GY-91 compass works: heading is on true north (compass + declination)
   if (baroOk || !isnan(fc.pressPa)) f |= FLAG_BARO_OK;
   if (imu::ok || fc.link()) f |= FLAG_IMU_OK;
   if (calRunning) f |= FLAG_MAG_CAL;

@@ -108,7 +108,7 @@ struct Telemetry {          // 60 bytes
   int16_t  temp_c100;       // BMP280 temperature, 0.01 C
   int16_t  roll_c100;       // 0.01 deg
   int16_t  pitch_c100;      // 0.01 deg
-  uint16_t heading_c100;    // 0.01 deg, magnetic north, from the GY-91; HEADING_UNKNOWN = no GY-91
+  uint16_t heading_c100;    // 0.01 deg, true north (GY-91 compass + declination); HEADING_UNKNOWN = no GY-91
   int16_t  vz_cms;          // vertical speed, cm/s
   uint16_t accel_mg;        // total acceleration, milli-g
   uint8_t  phase;           // PHASE_*

@@ -19,9 +19,20 @@ The team works on **Windows** (VS Code, PowerShell, Arduino IDE 2, Chrome/Edge).
   `RECON` near the top of the script; gimbal capture within 15 km / above 6 km, `gimbalWatch`
   is shared by the plan and the live flight), the "Camera · recon" tab (rotated boxes by
   category) and the "Intel report" tab (CSV + KML export). Stops are kept in localStorage.
+  Wind: `WIND.sample` is the one entry point (example field or the GFS grid `GFS`, `gfsSample`,
+  height interpolation per column, log-p pressure, `realAtm` gives T/p/rho to `physicsStep` via
+  `ctx.atm`). `WIND.t0` = launch time (epoch s). "Swarm" tab (`SW`, `swFly`, `swAnalyse`, `swNet`):
+  1-100 balloons, same physics/controllers, lat/lon integration, AR(1) wind error, radio mesh with
+  line-of-sight horizon, gimbal coverage grid; CSV/KML export.
 - `vision/` - Python vision server (port 8765): makes the simulated balloon-camera picture from
   Esri World Imagery tiles and runs the YOLO26-OBB detector (ONNX, onnxruntime). `search` param:
   look around N picture widths and frame the busiest spot (`best_frame`, shared with make_storyboard.py).
+  Also the wind data: `gfs_wind.py` downloads NOAA GFS 0.25° (NOMADS GRIB filter, box ±5°/±7° around
+  the launch, 28 pressure levels 1000-10 hPa, u/v/gh/T, 3-hourly) and decodes GRIB2 in pure numpy
+  (templates 5.0/5.2/5.3, JPEG2000/PNG via Pillow). Packs one `.habw` file per forecast into
+  `vision/wind_cache` (int16; layout in the file header). Endpoints: `/api/wind` (background job, poll
+  until `ready`; falls back to the cache when offline), `/api/wind.bin?file=`, `/api/wind/list`.
+  `HAB_NOMADS` env var points the downloader at another server (tests).
 - `camera_n6/` - untested OpenMV script for the real AI camera (not used in the simulated demo).
 
 ## Hard facts - don't change without asking
